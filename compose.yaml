@@ -1,0 +1,19 @@
+services:
+  qwen3-tts:
+    build: .
+    image: qwen3-tts-local:cuda124
+    container_name: qwen3_tts
+    restart: unless-stopped
+    ports:
+      - "8101:8000"
+    environment:
+      - MODEL_ID=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+    volumes:
+      - ./models:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

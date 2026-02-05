@@ -1,0 +1,19 @@
+# Model weights (downloaded at runtime)
+models/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Test output
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Environment
+.env
+
+# Claude Code local settings
+.claude/
