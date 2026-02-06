@@ -8,6 +8,8 @@ services:
       - "8101:8000"
     environment:
       - MODEL_ID=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - REQUEST_TIMEOUT=300
     volumes:
       - ./models:/root/.cache/huggingface
     deploy:
@@ -17,3 +19,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

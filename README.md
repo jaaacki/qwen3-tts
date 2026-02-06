@@ -81,8 +81,14 @@ Environment variables in `compose.yaml`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face model ID |
+| `IDLE_TIMEOUT` | `120` | Seconds of inactivity before unloading model from GPU (0 = disabled) |
+| `REQUEST_TIMEOUT` | `300` | Maximum seconds per inference request |
 
 The model cache is persisted to `./models` via volume mount.
+
+### GPU Memory Management
+
+The model loads **on-demand** with the first request and automatically **unloads after idle timeout** to free VRAM for other services. This is ideal for shared GPU environments.
 
 ## Testing
 

@@ -2,8 +2,14 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y git libsndfile1 ffmpeg
+# CUDA memory allocator tuning — reduce fragmentation for shared GPU
+ENV PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+ENV TOKENIZERS_PARALLELISM=false
+
+# Install system dependencies (sox needed by qwen-tts audio pipeline)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git libsndfile1 ffmpeg sox \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install python dependencies
 RUN pip install --no-cache-dir \
