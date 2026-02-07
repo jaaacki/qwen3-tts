@@ -10,8 +10,10 @@ services:
       - MODEL_ID=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - REQUEST_TIMEOUT=300
+      - IDLE_TIMEOUT=120
     volumes:
       - ./models:/root/.cache/huggingface
+    shm_size: "1g"
     deploy:
       resources:
         reservations:
@@ -24,4 +26,4 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 15s
