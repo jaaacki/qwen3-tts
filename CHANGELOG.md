@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.0 — 2026-02-07
+
+### Added
+- **`instruct` parameter** on `/v1/audio/speech` for style/instruction control
+- **Dedicated inference executor** — single-thread `ThreadPoolExecutor` replaces default pool, reducing thread management overhead
+- **`cudnn.benchmark` enabled** — CUDA autotuner selects fastest convolution algorithms for the GPU
+
+### Changed
+- **Removed per-request `gc.collect()` + `torch.cuda.empty_cache()`** — eliminates ~50-150ms latency penalty per request; CUDA memory cache is now reused across requests instead of thrashed
+- **Full GPU cleanup (`gc.collect` + `empty_cache` + `ipc_collect`) only runs during model unload**, not on every inference
+- **Module-level imports** for `scipy.signal` and `pydub` — no more per-request import overhead
+- **`asyncio.get_running_loop()`** replaces deprecated `asyncio.get_event_loop()` (3 occurrences)
+- **`np.asarray`** replaces `np.array` for zero-copy when model output is already float32
+- **Warmup runs inside `torch.inference_mode()`** with longer text (64 tokens) for better CUDA kernel coverage
+- Removed `release_gpu_memory()` calls from error handlers — local tensors are freed by Python refcounting on stack unwind
+
 ## v0.2.0 — 2026-02-06
 
 ### Added

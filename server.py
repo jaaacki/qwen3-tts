@@ -10,11 +10,25 @@ import gc
 import asyncio
 import time
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+import scipy.signal as scipy_signal
+
+try:
+    from pydub import AudioSegment as _PydubAudioSegment
+except ImportError:
+    _PydubAudioSegment = None
+
+# Enable cudnn autotuner — finds fastest convolution algorithms for the GPU
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 
 app = FastAPI(title="Qwen3-TTS API")
 
 model = None
 loaded_model_id = None
+
+# Single-thread executor for GPU inference — avoids default pool overhead
+_infer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-infer")
 
 # Semaphore to serialize GPU inference — prevents OOM with concurrent requests
 _infer_semaphore = asyncio.Semaphore(1)
@@ -61,6 +75,7 @@ class TTSRequest(BaseModel):
     response_format: str = "wav"
     speed: float = 1.0
     language: Optional[str] = None
+    instruct: Optional[str] = None
 
 
 class VoiceCloneRequest(BaseModel):
@@ -70,8 +85,8 @@ class VoiceCloneRequest(BaseModel):
     response_format: str = "wav"
 
 
-def release_gpu_memory():
-    """Force release of unused GPU memory back to the system."""
+def _release_gpu_full():
+    """Full GPU memory release — only used during model unload."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -103,15 +118,17 @@ def _load_model_sync():
     if torch.cuda.is_available():
         print("Warming up GPU...")
         try:
-            model.generate_custom_voice(
-                text="Hello.",
-                language="English",
-                speaker="vivian",
-                max_new_tokens=32,
-            )
+            with torch.inference_mode():
+                model.generate_custom_voice(
+                    text="Hello, warm up.",
+                    language="English",
+                    speaker="vivian",
+                    max_new_tokens=64,
+                )
         except Exception:
             pass
-        release_gpu_memory()
+        # Clear warmup allocations so steady-state VRAM is clean
+        _release_gpu_full()
 
     _last_used = time.time()
     print(f"Model loaded: {model_id}")
@@ -131,7 +148,7 @@ def _unload_model_sync():
     print("Unloading model (idle timeout)...")
     del model
     model = None
-    release_gpu_memory()
+    _release_gpu_full()
 
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -149,7 +166,8 @@ async def _ensure_model_loaded():
         if model is not None:
             _last_used = time.time()
             return
-        await asyncio.get_event_loop().run_in_executor(None, _load_model_sync)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_infer_executor, _load_model_sync)
         _last_used = time.time()
 
 
@@ -162,7 +180,8 @@ async def _idle_watchdog():
         if time.time() - _last_used > IDLE_TIMEOUT:
             async with _model_lock:
                 if model is not None and time.time() - _last_used > IDLE_TIMEOUT:
-                    await asyncio.get_event_loop().run_in_executor(None, _unload_model_sync)
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(_infer_executor, _unload_model_sync)
 
 
 @app.on_event("startup")
@@ -197,15 +216,14 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
         sf.write(buffer, audio_data, sample_rate, format="WAV")
         content_type = "audio/wav"
     elif output_format == "mp3":
-        try:
-            from pydub import AudioSegment
+        if _PydubAudioSegment is not None:
             wav_buffer = io.BytesIO()
             sf.write(wav_buffer, audio_data, sample_rate, format="WAV")
             wav_buffer.seek(0)
-            audio_segment = AudioSegment.from_wav(wav_buffer)
+            audio_segment = _PydubAudioSegment.from_wav(wav_buffer)
             audio_segment.export(buffer, format="mp3")
             content_type = "audio/mpeg"
-        except ImportError:
+        else:
             sf.write(buffer, audio_data, sample_rate, format="WAV")
             content_type = "audio/wav"
     elif output_format == "flac":
@@ -242,35 +260,30 @@ def detect_language(text: str) -> str:
     return "English"
 
 
-def _do_synthesize(text, language, speaker, gen_kwargs):
-    """Run TTS inference with memory cleanup after."""
-    try:
-        with torch.inference_mode():
-            wavs, sr = model.generate_custom_voice(
-                text=text,
-                language=language,
-                speaker=speaker,
-                **gen_kwargs,
-            )
-        return wavs, sr
-    finally:
-        release_gpu_memory()
+def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
+    """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
+    with torch.inference_mode():
+        wavs, sr = model.generate_custom_voice(
+            text=text,
+            language=language,
+            speaker=speaker,
+            instruct=instruct,
+            **gen_kwargs,
+        )
+    return wavs, sr
 
 
 def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
-    """Run voice clone inference with memory cleanup after."""
-    try:
-        with torch.inference_mode():
-            wavs, sr = model.generate_voice_clone(
-                text=text,
-                language=language,
-                ref_audio=ref_audio,
-                ref_text=ref_text,
-                **gen_kwargs,
-            )
-        return wavs, sr
-    finally:
-        release_gpu_memory()
+    """Run voice clone inference. No per-request GC — let CUDA reuse cached allocations."""
+    with torch.inference_mode():
+        wavs, sr = model.generate_voice_clone(
+            text=text,
+            language=language,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            **gen_kwargs,
+        )
+    return wavs, sr
 
 
 @app.post("/v1/audio/speech")
@@ -285,26 +298,27 @@ async def synthesize_speech(request: TTSRequest):
         speaker = resolve_voice(request.voice)
         language = request.language or detect_language(request.input)
         gen_kwargs = {"max_new_tokens": 2048}
+        text = request.input.strip()
 
+        loop = asyncio.get_running_loop()
         async with _infer_semaphore:
             wavs, sr = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: _do_synthesize(request.input.strip(), language, speaker, gen_kwargs)
+                loop.run_in_executor(
+                    _infer_executor,
+                    lambda: _do_synthesize(text, language, speaker, gen_kwargs, instruct=request.instruct)
                 ),
                 timeout=REQUEST_TIMEOUT
             )
 
-        audio_data = np.array(wavs[0], dtype=np.float32)
-        if len(audio_data.shape) > 1:
+        audio_data = np.asarray(wavs[0], dtype=np.float32)
+        if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
 
         # Speed adjustment via resampling
         if request.speed != 1.0:
-            import scipy.signal as signal
             new_length = int(len(audio_data) / request.speed)
             if new_length > 0:
-                audio_data = signal.resample(audio_data, new_length)
+                audio_data = scipy_signal.resample(audio_data, new_length)
 
         audio_bytes, content_type = convert_audio_format(
             audio_data, sr, request.response_format
@@ -319,12 +333,10 @@ async def synthesize_speech(request: TTSRequest):
         )
 
     except asyncio.TimeoutError:
-        release_gpu_memory()
         raise HTTPException(status_code=504, detail="Synthesis timed out")
     except HTTPException:
         raise
     except Exception as e:
-        release_gpu_memory()
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
 
 
@@ -351,13 +363,15 @@ async def clone_voice(
 
         language = language or detect_language(input)
         gen_kwargs = {"max_new_tokens": 2048}
+        text = input.strip()
 
+        loop = asyncio.get_running_loop()
         async with _infer_semaphore:
             wavs, sr = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,
+                loop.run_in_executor(
+                    _infer_executor,
                     lambda: _do_voice_clone(
-                        input.strip(),
+                        text,
                         language,
                         (ref_audio_data, ref_sr),
                         ref_text.strip() if ref_text else None,
@@ -367,8 +381,8 @@ async def clone_voice(
                 timeout=REQUEST_TIMEOUT
             )
 
-        audio_data = np.array(wavs[0], dtype=np.float32)
-        if len(audio_data.shape) > 1:
+        audio_data = np.asarray(wavs[0], dtype=np.float32)
+        if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
 
         audio_bytes_out, content_type = convert_audio_format(
@@ -384,12 +398,10 @@ async def clone_voice(
         )
 
     except asyncio.TimeoutError:
-        release_gpu_memory()
         raise HTTPException(status_code=504, detail="Voice clone timed out")
     except HTTPException:
         raise
     except Exception as e:
-        release_gpu_memory()
         raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
 
 
