@@ -310,7 +310,7 @@ async def synthesize_speech(request: TTSRequest):
                 timeout=REQUEST_TIMEOUT
             )
 
-        audio_data = np.asarray(wavs[0], dtype=np.float32)
+        audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
 
@@ -381,7 +381,7 @@ async def clone_voice(
                 timeout=REQUEST_TIMEOUT
             )
 
-        audio_data = np.asarray(wavs[0], dtype=np.float32)
+        audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
 
