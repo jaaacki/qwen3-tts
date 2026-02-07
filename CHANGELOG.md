@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.1 — 2026-02-07
+
+### Added
+- **uvloop** — high-performance async event loop replacing default asyncio loop
+- **httptools** — C-based HTTP parser for uvicorn replacing pure-Python h11
+- **orjson** — fast JSON serialization for FastAPI request/response handling
+- **`shm_size: 1g`** in compose.yaml for PyTorch shared memory
+
+### Changed
+- Uvicorn CMD now uses `--loop uvloop --http httptools --no-access-log --timeout-keep-alive 65`
+- `OMP_NUM_THREADS=2` / `MKL_NUM_THREADS=2` — limits CPU thread spawning (GPU does the heavy work)
+- `PYTHONUNBUFFERED=1` / `PYTHONDONTWRITEBYTECODE=1` — immediate log output, skip .pyc generation
+- Healthcheck `start_period` reduced from 120s to 15s (model loads on-demand, server starts in seconds)
+- `IDLE_TIMEOUT` now explicit in compose.yaml environment
+
 ## v0.3.0 — 2026-02-07
 
 ### Added
