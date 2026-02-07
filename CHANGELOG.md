@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.2 — 2026-02-07
+
+### Fixed
+- **Audio cutoff at end of speech** — reverted `np.asarray` (zero-copy view) back to `np.array` with explicit copy; the model's underlying buffer could be freed before audio encoding completes, truncating the tail of the audio
+
 ## v0.3.1 — 2026-02-07
 
 ### Added
