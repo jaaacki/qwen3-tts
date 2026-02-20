@@ -372,3 +372,12 @@ The torchaudio integration replaces soundfile for WAV encoding and scipy for spe
 **Related**: Issue #20
 
 The async encode pipeline moves audio format conversion (WAV/MP3/FLAC/OGG encoding) from the main event loop thread into a dedicated 2-thread CPU executor. This is infrastructure, not the full optimization. The full optimization is: while encoding sentence N on a CPU thread, start synthesizing sentence N+1 on the GPU. That requires the streaming endpoints from Phase 1 (#3/#4). Without streaming, there is only one inference per request, so encoding overlap has limited benefit for single-sentence requests. For multi-sentence streaming, the pipeline overlap could reduce total latency by 20-40ms per sentence (the encoding time that would otherwise gate the next synthesis). The `_split_sentences` helper is included here because it is the natural boundary for chunking. The `import re` was moved to the top of the file per Python convention — inline imports are confusing.
+
+---
+
+## Entry 0020 — WebSocket streaming: sentence chunking and PCM safety
+**Date**: 2026-02-20
+**Type**: What could go wrong
+**Related**: Issue #24
+
+Two bugs were caught in review. First, the sentence-splitting regex `(?<=[.!?])\s+` incorrectly splits on abbreviations like "Dr. Smith" or "U.S.A.". The fix uses abbreviation-aware lookbehinds: `(?<!\w\.\w.)(?<![A-Z][a-z]\.)` and adds CJK full-width punctuation (U+3002, U+FF01, U+FF1F) so Chinese/Japanese text with `。！？` gets chunked correctly. Second, float audio values outside [-1.0, 1.0] cause int16 wraparound distortion when multiplied by 32767. The model can occasionally produce values slightly above 1.0. Adding `np.clip(audio_data, -1.0, 1.0)` before conversion prevents this. The existing PCM streaming endpoint already had this clip; the WebSocket endpoint missed it.

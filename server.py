@@ -558,8 +558,8 @@ def _adjust_speed(audio_data: np.ndarray, sample_rate: int, speed: float) -> np.
 
 
 def _split_sentences(text: str) -> list[str]:
-    """Split text into sentences, aware of common abbreviations."""
-    pattern = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!)\s+'
+    """Split text into sentences, aware of common abbreviations and CJK punctuation."""
+    pattern = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!|\u3002|\uff01|\uff1f)\s+'
     sentences = re.split(pattern, text.strip())
     return [s.strip() for s in sentences if s.strip()]
 
@@ -979,7 +979,7 @@ async def ws_synthesize(websocket: WebSocket):
                     if new_length > 0:
                         audio_data = scipy_signal.resample(audio_data, new_length)
 
-                pcm = (audio_data * 32767).astype(np.int16).tobytes()
+                pcm = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
                 await websocket.send_bytes(pcm)
                 global _last_used
                 _last_used = time.time()

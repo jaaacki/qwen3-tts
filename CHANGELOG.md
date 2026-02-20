@@ -3,7 +3,11 @@
 ## [Unreleased — Issue #24: WebSocket streaming endpoint] — 2026-02-20
 ### Added
 - **WebSocket streaming endpoint** — `WS /v1/audio/speech/ws` accepts JSON, streams binary PCM per sentence chunk, sends `{"event": "done"}` on completion (#24)
-- **`websockets`** added to Dockerfile pip dependencies (#24)
+- **Abbreviation-aware sentence splitting** — regex handles Dr., U.S.A., CJK full-width punctuation (#24)
+- **`websockets`** added to Dockerfile — required by Starlette for WebSocket protocol (#24)
+
+### Fixed
+- Add `np.clip(-1.0, 1.0)` before int16 PCM conversion to prevent audio distortion from out-of-range values (#24)
 
 ## [Unreleased — Issue #20: Async audio encode pipeline] — 2026-02-20
 ### Added
