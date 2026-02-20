@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #28: Preload model at startup] — 2026-02-20
+### Added
+- `PRELOAD_MODEL` env var — set to `true` to load model at startup instead of first request (#28)
+- Healthcheck `start_period` increased to 60s to accommodate preload
+
 ## [Unreleased — Issue #27: Always-on mode] — 2026-02-20
 ### Added
 - Always-on mode documentation — `IDLE_TIMEOUT=0` disables idle unload for dedicated GPU servers (#27)
