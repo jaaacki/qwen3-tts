@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #7: Lock GPU clocks to max boost] — 2026-02-20
+### Changed
+- `docker-entrypoint.sh` — lock GPU clocks to max boost frequency at container startup for consistent inference latency (#7)
+
 ## [Unreleased — Issue #6: Enable GPU persistence mode] — 2026-02-20
 ### Added
 - `docker-entrypoint.sh` — GPU persistence mode (`nvidia-smi -pm 1`) runs at container startup, eliminating 200-500ms GPU cold-start penalty (#6)
