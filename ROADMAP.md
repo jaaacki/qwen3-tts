@@ -10,10 +10,10 @@ Three-phase plan to take Qwen3-TTS from a working prototype to a production-grad
 
 Before optimizing anything, we instrument. Then we remove the biggest bottleneck (fixed token budget), and finally deliver streaming so clients hear audio while synthesis continues.
 
-- [ ] #1 Add per-request latency breakdown logging
-- [ ] #2 Add adaptive `max_new_tokens` scaling with text length
-- [ ] #3 Add sentence-chunked SSE streaming endpoint
-- [ ] #4 Add raw PCM streaming endpoint
+- [x] #1 Add per-request latency breakdown logging
+- [x] #2 Add adaptive `max_new_tokens` scaling with text length
+- [x] #3 Add sentence-chunked SSE streaming endpoint
+- [x] #4 Add raw PCM streaming endpoint
 
 ---
 
