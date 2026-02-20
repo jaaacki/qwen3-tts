@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.6.0 — 2026-02-20
+
+Phase 3 Production Grade complete. All 36 roadmap issues implemented.
+
+### Added
+- Audio output LRU cache — `AUDIO_CACHE_MAX`, `POST /cache/clear` (#17)
+- Opus codec support via pydub/ffmpeg (#18)
+- GPU-accelerated audio processing with torchaudio (#19)
+- Async audio encode pipeline — overlap encode N with synthesis N+1 (#20)
+- jemalloc memory allocator via `LD_PRELOAD` (#21)
+- CPU affinity for inference thread — `INFERENCE_CPU_CORES` env var (#22)
+- Transparent huge pages for model weights via docker-entrypoint.sh (#23)
+- WebSocket streaming endpoint `WS /v1/audio/speech/ws` (#24)
+- HTTP/2 support with conditional TLS (`SSL_KEYFILE`/`SSL_CERTFILE`) (#25)
+- Unix domain socket support — `UNIX_SOCKET_PATH` env var (#26)
+- Always-on mode documentation — `IDLE_TIMEOUT=0` (#27)
+- Eager model preload — `PRELOAD_MODEL` env var (#28)
+- `ipc: host` in Docker compose for CUDA IPC (#29)
+- Prometheus metrics endpoint `GET /metrics` with custom TTS gauges (#30)
+- Structured JSON logging with per-request fields and `LOG_FORMAT` env var (#31)
+- Request queue depth limit with 503 early rejection — `MAX_QUEUE_DEPTH` (#32)
+- Voice prompt cache for `/clone` endpoint — `VOICE_CACHE_MAX` (#15)
+- GPU memory pool pre-warming after model load (#16)
+
+### Changed
+- Migrated from `@app.on_event` to FastAPI lifespan context manager (#33)
+- Pinned all dependency versions in `requirements.txt` (#34)
+- Converted to multi-stage Docker build — runtime image ships no build tools (#35)
+- Removed dead `VoiceCloneRequest` Pydantic model (#36)
+
+---
+
 ## [Unreleased — Issue #32: Request queue depth limit] — 2026-02-20
 ### Added
 - Request queue depth limit with 503 early rejection (#32)

@@ -4,7 +4,7 @@ Three-phase plan to take Qwen3-TTS from a working prototype to a production-grad
 
 ---
 
-## Phase 1 — Real-Time (v0.1.0)
+## Phase 1 — Real-Time (v0.4.0)
 
 **Vision**: First audio reaches the client in under 500 ms.
 
@@ -17,7 +17,7 @@ Before optimizing anything, we instrument. Then we remove the biggest bottleneck
 
 ---
 
-## Phase 2 — Speed & Quality (v0.2.0)
+## Phase 2 — Speed & Quality (v0.5.0)
 
 **Vision**: Every synthesis is measurably faster and the audio quality is noticeably better.
 
@@ -38,7 +38,7 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 
 ---
 
-## Phase 3 — Production Grade (v0.3.0)
+## Phase 3 — Production Grade (v0.6.0)
 
 **Vision**: The server is observable, resilient, and efficient under real production load.
 
@@ -75,4 +75,4 @@ No unplaced items. All improvements from the initial analysis have been assigned
 
 ## Current Status
 
-**v0.0.1** — Pre-roadmap. The server is functional with OpenAI-compatible TTS and voice cloning endpoints, GPU lifecycle management, and Docker deployment. No streaming, no caching, no observability beyond the `/health` endpoint.
+**v0.6.0** — Roadmap complete. All 36 issues implemented across 3 phases. The server is production-grade with real-time streaming, GPU-optimized inference, audio/voice caching, structured observability (Prometheus, JSON logging), and full protocol support (HTTP/1.1, HTTP/2, WebSocket, Unix socket).
