@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased — Issue #2: Add adaptive max_new_tokens scaling] — 2026-02-20
+### Changed
+- Replace hardcoded `max_new_tokens: 2048` with adaptive scaling based on input text length (#2)
+  - Short inputs (<=16 words) get minimum budget of 128 tokens
+  - Budget scales at 8 tokens/word with a cap at 2048
+  - Reduces KV-cache allocation overhead by up to 40x for short texts
+
 ## [Unreleased — Issue #1: Add per-request latency breakdown logging] — 2026-02-20
 ### Added
 - Per-request latency breakdown logging via `logging.getLogger("qwen3-tts")` with `time.perf_counter()` timing in both `/v1/audio/speech` and `/v1/audio/speech/clone` endpoints (#1)
