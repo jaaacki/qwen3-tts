@@ -28,7 +28,7 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 - [x] #7 Lock GPU clocks to max boost
 - [x] #8 Switch `attn_implementation` to `flash_attention_2`
 - [x] #9 Enable `torch.compile` on model forward pass
-- [ ] #10 Deepen GPU warmup with multi-length synthesis calls
+- [x] #10 Deepen GPU warmup with multi-length synthesis calls
 - [ ] #11 Add VAD silence trimming (strip leading/trailing silence)
 - [ ] #12 Add text normalization for numbers, currency, abbreviations
 - [ ] #13 Replace Unicode language heuristic with fasttext detection

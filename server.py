@@ -133,19 +133,26 @@ def _load_model_sync():
         except Exception as e:
             print(f"torch.compile not available or failed: {e}")
 
-    # Warmup inference to trigger CUDA kernel caching
+    # Multi-length warmup to pre-cache CUDA kernels for different input sizes
     if torch.cuda.is_available():
-        print("Warming up GPU...")
-        try:
-            with torch.inference_mode():
-                model.generate_custom_voice(
-                    text="Hello, warm up.",
-                    language="English",
-                    speaker="vivian",
-                    max_new_tokens=64,
-                )
-        except Exception:
-            pass
+        print("Warming up GPU with multi-length synthesis...")
+        warmup_texts = [
+            "Hello.",                                       # ~5 tokens — short prompt path
+            "Hello, how are you doing today?",              # ~20 tokens — medium
+            "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.",  # ~50 tokens — longer
+        ]
+        for text in warmup_texts:
+            try:
+                with torch.inference_mode():
+                    model.generate_custom_voice(
+                        text=text,
+                        language="English",
+                        speaker="vivian",
+                        max_new_tokens=256,
+                    )
+                print(f"  Warmup: synthesized {len(text)} chars")
+            except Exception as e:
+                print(f"  Warmup failed for '{text[:20]}...': {e}")
         # Clear warmup allocations so steady-state VRAM is clean
         _release_gpu_full()
 
