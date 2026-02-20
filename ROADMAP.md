@@ -53,7 +53,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [x] #23 Enable transparent huge pages for model weights
 - [x] #24 Add WebSocket streaming endpoint
 - [x] #25 Enable HTTP/2 support
-- [ ] #26 Add Unix domain socket support for same-host clients
+- [x] #26 Add Unix domain socket support for same-host clients
 - [x] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)
 - [x] #28 Add eager model preload on startup (`PRELOAD_MODEL` env var)
 - [x] #29 Add `ipc:host` to Docker compose for CUDA IPC
