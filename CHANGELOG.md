@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #14: Replace scipy speed adjustment with pyrubberband] — 2026-02-20
+### Changed
+- `_adjust_speed()` now uses `pyrubberband.time_stretch()` for pitch-preserving speed changes, falling back to `scipy.signal.resample` when pyrubberband is unavailable (#14)
+- Added `pyrubberband` to Dockerfile pip dependencies and `rubberband-cli` to apt dependencies
+
 ## [Unreleased — Issue #13: Replace Unicode language heuristic with fasttext detection] — 2026-02-20
 ### Changed
 - `detect_language()` now uses `fasttext-langdetect` for accurate multi-language detection across 10 languages, falling back to Unicode character-range heuristic when fasttext is unavailable (#13)

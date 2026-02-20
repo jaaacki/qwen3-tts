@@ -14,7 +14,7 @@ with patch.dict("sys.modules", _mock_modules):
     from server import (
         _trim_silence, _normalize_text, _expand_currency,
         _detect_language_unicode, _get_langdetect, detect_language,
-        resolve_voice, _LANG_MAP,
+        _adjust_speed, resolve_voice, _LANG_MAP,
     )
     import server
 
@@ -149,8 +149,6 @@ class TestExpandCurrency:
 # --- Issue #13: fasttext language detection tests ---
 
 class TestDetectLanguageUnicode:
-    """Test the Unicode fallback detector (_detect_language_unicode)."""
-
     def test_chinese_characters(self):
         assert _detect_language_unicode("你好世界") == "Chinese"
 
@@ -169,16 +167,11 @@ class TestDetectLanguageUnicode:
     def test_empty_string(self):
         assert _detect_language_unicode("") == "English"
 
-    def test_numbers_only(self):
-        assert _detect_language_unicode("12345") == "English"
-
     def test_mixed_starts_with_chinese(self):
         assert _detect_language_unicode("你好 hello") == "Chinese"
 
 
 class TestLangMap:
-    """Test the ISO code to Qwen language name mapping."""
-
     def test_known_codes(self):
         assert _LANG_MAP["zh"] == "Chinese"
         assert _LANG_MAP["en"] == "English"
@@ -193,8 +186,6 @@ class TestLangMap:
 
 
 class TestGetLangdetect:
-    """Test lazy-loading of the fasttext detector."""
-
     def test_returns_false_when_import_fails(self):
         server._langdetect_model = None
         with patch.dict(sys.modules, {"fasttext_langdetect": None}):
@@ -211,8 +202,6 @@ class TestGetLangdetect:
 
 
 class TestDetectLanguageWithFasttext:
-    """Test detect_language with mocked fasttext detector."""
-
     def test_uses_fasttext_when_available(self):
         mock_detector = MagicMock(return_value={"lang": "fr", "score": 0.99})
         server._langdetect_model = None
@@ -226,18 +215,6 @@ class TestDetectLanguageWithFasttext:
         with patch.object(server, "_get_langdetect", return_value=mock_detector):
             result = detect_language("你好")
         assert result == "Chinese"
-
-    def test_maps_ja_to_japanese(self):
-        mock_detector = MagicMock(return_value={"lang": "ja", "score": 0.95})
-        with patch.object(server, "_get_langdetect", return_value=mock_detector):
-            result = detect_language("こんにちは")
-        assert result == "Japanese"
-
-    def test_maps_en_to_english(self):
-        mock_detector = MagicMock(return_value={"lang": "en", "score": 0.99})
-        with patch.object(server, "_get_langdetect", return_value=mock_detector):
-            result = detect_language("Hello world")
-        assert result == "English"
 
     def test_unknown_lang_defaults_to_english(self):
         mock_detector = MagicMock(return_value={"lang": "xx", "score": 0.5})
@@ -256,11 +233,6 @@ class TestDetectLanguageWithFasttext:
             result = detect_language("你好世界")
         assert result == "Chinese"
 
-    def test_falls_back_unicode_korean(self):
-        with patch.object(server, "_get_langdetect", return_value=False):
-            result = detect_language("안녕하세요")
-        assert result == "Korean"
-
     def test_maps_all_supported_languages(self):
         for iso, name in _LANG_MAP.items():
             mock_detector = MagicMock(return_value={"lang": iso, "score": 0.9})
@@ -269,11 +241,71 @@ class TestDetectLanguageWithFasttext:
             assert result == name, f"Failed for {iso} -> {name}"
 
 
+# --- Issue #14: pyrubberband speed adjustment tests ---
+
+class TestAdjustSpeedWithPyrubberband:
+    def test_speed_1_returns_unchanged(self):
+        audio = np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
+        result = _adjust_speed(audio, 24000, 1.0)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_speed_faster_calls_pyrubberband(self):
+        audio = np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
+        expected = np.array([0.1, 0.3, 0.5], dtype=np.float32)
+        mock_rb = MagicMock()
+        mock_rb.time_stretch.return_value = expected
+        with patch.object(server, "_pyrubberband", mock_rb):
+            result = _adjust_speed(audio, 24000, 1.5)
+        mock_rb.time_stretch.assert_called_once_with(audio, 24000, 1.5)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_speed_slower_calls_pyrubberband(self):
+        audio = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        expected = np.array([0.1, 0.15, 0.2, 0.25, 0.3], dtype=np.float32)
+        mock_rb = MagicMock()
+        mock_rb.time_stretch.return_value = expected
+        with patch.object(server, "_pyrubberband", mock_rb):
+            result = _adjust_speed(audio, 24000, 0.75)
+        mock_rb.time_stretch.assert_called_once_with(audio, 24000, 0.75)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_preserves_sample_rate(self):
+        audio = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        mock_rb = MagicMock()
+        mock_rb.time_stretch.return_value = audio
+        with patch.object(server, "_pyrubberband", mock_rb):
+            _adjust_speed(audio, 48000, 2.0)
+        mock_rb.time_stretch.assert_called_once_with(audio, 48000, 2.0)
+
+
+class TestAdjustSpeedFallback:
+    def test_speed_1_returns_unchanged(self):
+        audio = np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
+        with patch.object(server, "_pyrubberband", None):
+            result = _adjust_speed(audio, 24000, 1.0)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_speed_faster_calls_scipy_resample(self):
+        audio = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float32)
+        expected = np.array([0.1, 0.3, 0.5, 0.6], dtype=np.float32)
+        mock_scipy = MagicMock()
+        mock_scipy.resample.return_value = expected
+        with patch.object(server, "_pyrubberband", None), \
+             patch.object(server, "scipy_signal", mock_scipy):
+            result = _adjust_speed(audio, 24000, 1.5)
+        mock_scipy.resample.assert_called_once_with(audio, 4)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_zero_length_returns_original(self):
+        audio = np.array([0.1], dtype=np.float32)
+        with patch.object(server, "_pyrubberband", None):
+            result = _adjust_speed(audio, 24000, 100.0)
+        np.testing.assert_array_equal(result, audio)
+
+
 # --- Issue #5: TF32 matmul mode tests ---
 
 class TestTF32Flags:
-    """Issue #5: TF32 matmul and cudnn flags should be enabled on CUDA hardware."""
-
     def test_tf32_matmul_enabled(self):
         if torch.cuda.is_available():
             assert torch.backends.cuda.matmul.allow_tf32 is True

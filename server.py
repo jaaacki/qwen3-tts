@@ -15,6 +15,11 @@ from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
 
 try:
+    import pyrubberband as _pyrubberband
+except ImportError:
+    _pyrubberband = None
+
+try:
     from pydub import AudioSegment as _PydubAudioSegment
 except ImportError:
     _PydubAudioSegment = None
@@ -375,6 +380,19 @@ def _normalize_text(text: str) -> str:
     return text
 
 
+def _adjust_speed(audio_data: np.ndarray, sample_rate: int, speed: float) -> np.ndarray:
+    """Adjust audio playback speed. Uses pyrubberband (pitch-preserving) if available,
+    falling back to scipy resampling."""
+    if speed == 1.0:
+        return audio_data
+    if _pyrubberband is not None:
+        return _pyrubberband.time_stretch(audio_data, sample_rate, speed)
+    new_length = int(len(audio_data) / speed)
+    if new_length > 0:
+        return scipy_signal.resample(audio_data, new_length)
+    return audio_data
+
+
 def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
     with torch.inference_mode():
@@ -432,11 +450,7 @@ async def synthesize_speech(request: TTSRequest):
 
         audio_data = _trim_silence(audio_data, sr)
 
-        # Speed adjustment via resampling
-        if request.speed != 1.0:
-            new_length = int(len(audio_data) / request.speed)
-            if new_length > 0:
-                audio_data = scipy_signal.resample(audio_data, new_length)
+        audio_data = _adjust_speed(audio_data, sr, request.speed)
 
         audio_bytes, content_type = convert_audio_format(
             audio_data, sr, request.response_format

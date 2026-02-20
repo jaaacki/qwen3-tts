@@ -4,6 +4,23 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0008 — Why pitch-preserving time stretch matters for TTS
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #14 — Replace scipy speed adjustment with pitch-preserving pyrubberband
+
+The original speed adjustment used `scipy.signal.resample()` to change the number of audio samples. This is a frequency-domain resampling that compresses or expands the waveform uniformly. The problem: when you compress samples to make audio play faster, the fundamental frequency of the voice shifts upward proportionally. At speed=1.5, the voice pitch rises by 50%, creating the classic "chipmunk" effect. At speed=0.75, the pitch drops, making the voice sound artificially deep.
+
+For a TTS server, this is unacceptable. Speed adjustment is used for accessibility (slower speech for comprehension), time fitting (faster speech for constrained UIs), and prosody matching (adjusting pace to context). In all cases, the user expects the voice to sound like the same person speaking at a different pace, not a pitch-shifted version.
+
+pyrubberband wraps the Rubber Band Library, which implements PSOLA (Pitch-Synchronous Overlap-Add) time stretching. PSOLA works by identifying pitch periods in the audio, duplicating or removing complete pitch cycles, and crossfading at zero-crossing points. The result is audio that plays faster or slower without any pitch change. The algorithm is well-established in audio processing and adds negligible latency (< 10ms for typical TTS output lengths).
+
+The implementation uses the same graceful-fallback pattern as other optional dependencies: if `pyrubberband` is not importable, `_pyrubberband` is set to `None` and the function falls back to `scipy.signal.resample`. This keeps the server functional on systems without the rubberband-cli binary installed, at the cost of the pitch shift artifact.
+
+The Dockerfile installs both `pyrubberband` (Python bindings) and `rubberband-cli` (the C++ binary that pyrubberband calls). The binary is available in Ubuntu's package manager, so no compilation is needed.
+
+---
+
 ## Entry 0001 — Project baseline: current architecture
 **Date**: 2026-02-20
 **Type**: Why this design
