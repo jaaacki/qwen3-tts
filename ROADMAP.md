@@ -45,7 +45,7 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 Caching and codec work unlocks efficient streaming. System-level tuning reduces jitter. Protocol upgrades widen the deployment surface. Lifecycle and observability close the loop for production operations. Housekeeping at the end cleans up tech debt while the server is stable.
 
 - [x] #17 Add full audio output LRU cache (text+voice to cached bytes)
-- [ ] #18 Add Opus codec support for streaming
+- [x] #18 Add Opus codec support for streaming
 - [ ] #19 Add GPU-accelerated audio processing with torchaudio
 - [ ] #20 Add async audio encode pipeline (overlap encode N with synthesis N+1)
 - [x] #21 Add jemalloc memory allocator via `LD_PRELOAD`

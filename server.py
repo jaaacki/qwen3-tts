@@ -401,6 +401,20 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
     elif output_format == "ogg":
         sf.write(buffer, audio_data, sample_rate, format="OGG")
         content_type = "audio/ogg"
+    elif output_format == "opus":
+        if _PydubAudioSegment is not None:
+            wav_buffer = io.BytesIO()
+            sf.write(wav_buffer, audio_data, sample_rate, format="WAV")
+            wav_buffer.seek(0)
+            audio_segment = _PydubAudioSegment.from_wav(wav_buffer)
+            audio_segment.export(
+                buffer, format="opus", codec="libopus",
+                parameters=["-b:a", "64k"]
+            )
+            content_type = "audio/opus"
+        else:
+            sf.write(buffer, audio_data, sample_rate, format="WAV")
+            content_type = "audio/wav"
     else:
         sf.write(buffer, audio_data, sample_rate, format="WAV")
         content_type = "audio/wav"

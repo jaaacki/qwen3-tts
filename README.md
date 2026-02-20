@@ -9,7 +9,7 @@ OpenAI-compatible Text-to-Speech API server powered by [Qwen3-TTS-0.6B](https://
 - **OpenAI voice aliases** — alloy, echo, fable, onyx, nova, shimmer
 - **Voice cloning** — generate speech from a reference audio sample
 - **Multi-language** — English, Chinese, Japanese, Korean, German, Italian, Portuguese, Spanish, French, Russian, Beijing dialect, Sichuan dialect
-- **Multiple output formats** — WAV, MP3, FLAC, OGG
+- **Multiple output formats** — WAV, MP3, FLAC, OGG, Opus
 - **Speed control** — adjustable playback speed via resampling
 - **Audio output cache** — LRU cache skips GPU entirely on repeated requests (~1ms vs 500ms+)
 
@@ -47,7 +47,7 @@ curl -X POST http://localhost:8101/v1/audio/speech \
 |-----------|------|---------|-------------|
 | `input` | string | *required* | Text to synthesize |
 | `voice` | string | `vivian` | Voice name or OpenAI alias |
-| `response_format` | string | `wav` | Output format: `wav`, `mp3`, `flac`, `ogg` |
+| `response_format` | string | `wav` | Output format: `wav`, `mp3`, `flac`, `ogg`, `opus` |
 | `speed` | float | `1.0` | Playback speed multiplier |
 | `language` | string | *auto-detect* | Language override |
 

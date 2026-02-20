@@ -34,7 +34,7 @@ ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
 
 # Install runtime-only system dependencies (no git, no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 \
+    libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
