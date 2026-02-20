@@ -4,12 +4,14 @@ from pydantic import BaseModel
 from typing import Optional
 import torch
 import soundfile as sf
+import hashlib
 import io
 import os
 import gc
 import asyncio
 import time
 import numpy as np
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
 
@@ -44,6 +46,33 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "120"))
 
 # Track last request time
 _last_used = 0.0
+
+# Audio output LRU cache — skips GPU entirely on cache hit
+_AUDIO_CACHE_MAX = int(os.getenv("AUDIO_CACHE_MAX", "256"))
+_audio_cache: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
+
+
+def _audio_cache_key(text: str, voice: str, speed: float, fmt: str, language: str = "", instruct: str = "") -> str:
+    raw = f"{text}|{voice}|{speed}|{fmt}|{language}|{instruct}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _get_audio_cache(key: str) -> tuple[bytes, str] | None:
+    if _AUDIO_CACHE_MAX <= 0:
+        return None
+    if key in _audio_cache:
+        _audio_cache.move_to_end(key)
+        return _audio_cache[key]
+    return None
+
+
+def _set_audio_cache(key: str, data: bytes, content_type: str) -> None:
+    if _AUDIO_CACHE_MAX <= 0:
+        return
+    if len(_audio_cache) >= _AUDIO_CACHE_MAX:
+        _audio_cache.popitem(last=False)
+    _audio_cache[key] = (data, content_type)
+
 
 # Map OpenAI-style voice names to Qwen3-TTS speakers
 VOICE_MAP = {
@@ -197,8 +226,18 @@ async def health():
         "model_id": loaded_model_id,
         "cuda": torch.cuda.is_available(),
         "voices": list(VOICE_MAP.keys()),
+        "audio_cache_size": len(_audio_cache),
+        "audio_cache_max": _AUDIO_CACHE_MAX,
         **gpu_info,
     }
+
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """Clear the audio output cache."""
+    count = len(_audio_cache)
+    _audio_cache.clear()
+    return {"cleared": count}
 
 
 def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format: str) -> tuple[bytes, str]:
@@ -282,16 +321,31 @@ def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
     """OpenAI-compatible TTS endpoint using CustomVoice model."""
-    await _ensure_model_loaded()
-
     if not request.input or not request.input.strip():
         raise HTTPException(status_code=400, detail="Input text is required")
 
+    speaker = resolve_voice(request.voice)
+    text = request.input.strip()
+
+    # Fast path: return cached audio without touching the GPU
+    cache_key = _audio_cache_key(
+        text, speaker, request.speed, request.response_format, request.language or "", request.instruct or ""
+    )
+    cached = _get_audio_cache(cache_key)
+    if cached is not None:
+        return Response(
+            content=cached[0],
+            media_type=cached[1],
+            headers={
+                "Content-Disposition": f'attachment; filename="speech.{request.response_format}"'
+            },
+        )
+
+    await _ensure_model_loaded()
+
     try:
-        speaker = resolve_voice(request.voice)
         language = request.language or detect_language(request.input)
         gen_kwargs = {"max_new_tokens": 2048}
-        text = request.input.strip()
 
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
@@ -316,6 +370,8 @@ async def synthesize_speech(request: TTSRequest):
         audio_bytes, content_type = convert_audio_format(
             audio_data, sr, request.response_format
         )
+
+        _set_audio_cache(cache_key, audio_bytes, content_type)
 
         return Response(
             content=audio_bytes,

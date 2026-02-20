@@ -136,3 +136,20 @@ The improvement plan includes three layers of caching, and the ordering from hig
 The ordering matters for implementation priority. The output cache collapses the entire pipeline for repeated requests — inference, audio encoding, everything. One dict lookup replaces all of it. The voice prompt cache only saves preprocessing. The KV cache only saves part of inference. In terms of implementation effort, the output cache is roughly 20 lines of code. The voice prompt cache is similar. The KV cache is an open research question.
 
 For the phone call use case, the realistic expectation is that the output cache provides the majority of the benefit. IVR menus, hold messages, greeting phrases, and common system responses repeat constantly. A deployment serving 1000 calls per day with 20 unique system phrases would see cache hit rates above 90% after the first few calls. The per-request cost drops from 500ms of GPU inference to 1ms of memory lookup.
+
+---
+
+## Entry 0008 — Audio cache: key design and LRU eviction
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #17
+
+The audio output cache is an OrderedDict keyed by SHA-256 of `text|voice|speed|format|instruct`. The key includes every parameter that affects the output — if any parameter changes, the cache key changes, and a new synthesis runs. The pipe delimiter prevents ambiguity between parameters (e.g., "hello|vivian" vs "hello|" + "vivian").
+
+The cache stores the final encoded bytes and content type, not the raw audio array. This means a cache hit returns the exact HTTP response body — no format conversion, no speed adjustment, no GPU work at all. The cost of a cache hit is one SHA-256 hash (~1 microsecond) plus one OrderedDict lookup (~1 microsecond).
+
+The cache check happens before `_ensure_model_loaded()`. This is deliberate: if every request for the next hour hits the cache, the model never loads, and VRAM stays free. The idle watchdog continues running, but since the model was never loaded, it has nothing to unload. This makes the cache especially valuable in shared GPU environments where VRAM is contended.
+
+LRU eviction uses `OrderedDict.move_to_end()` on hit and `popitem(last=False)` when full. This is O(1) for both operations. The default capacity of 256 entries is sized for a typical IVR deployment where 20-50 unique system phrases repeat across thousands of calls. At roughly 100KB per WAV entry (1 second of 24kHz 16-bit audio), 256 entries consume about 25MB of RAM — negligible compared to the 2.4GB model.
+
+Setting `AUDIO_CACHE_MAX=0` disables all cache operations: `_get_audio_cache` returns None immediately, `_set_audio_cache` is a no-op. This is the safe default for testing or debugging where deterministic behavior is needed.

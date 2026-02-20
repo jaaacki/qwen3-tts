@@ -11,6 +11,7 @@ services:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - REQUEST_TIMEOUT=300
       - IDLE_TIMEOUT=120
+      - AUDIO_CACHE_MAX=256
     volumes:
       - ./models:/root/.cache/huggingface
     shm_size: "1g"
