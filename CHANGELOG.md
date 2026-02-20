@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased — Issue #30: Prometheus metrics endpoint] — 2026-02-20
+### Added
+- Prometheus metrics endpoint (`GET /metrics`) via `prometheus-fastapi-instrumentator` (#30)
+- Custom metrics: `tts_requests_total` (counter by voice/format), `tts_inference_duration_seconds` (histogram), `tts_model_loaded` (gauge)
+- `PROMETHEUS_ENABLED` env var (default `true`) to enable/disable metrics
+
 ## [Unreleased — Issue #28: Preload model at startup] — 2026-02-20
 ### Added
 - `PRELOAD_MODEL` env var — set to `true` to load model at startup instead of first request (#28)

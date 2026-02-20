@@ -139,6 +139,7 @@ Environment variables in `compose.yaml`:
 | `TEXT_NORMALIZE` | `true` | Expand numbers, currency, and abbreviations before synthesis |
 | `VOICE_CACHE_MAX` | `32` | LRU cache capacity for processed voice clone reference audio (0 = disabled) |
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of on first request |
+| `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics at `GET /metrics` |
 
 The model cache is persisted to `./models` via volume mount.
 

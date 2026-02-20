@@ -299,3 +299,18 @@ async def lifespan(app):
 ```
 
 For our server, the immediate benefit is that model unload now runs on graceful shutdown. Previously, if the container was stopped with SIGTERM, the model was not explicitly unloaded — the process just died and the GPU driver reclaimed VRAM. With the lifespan teardown, we run `_unload_model_sync()` which calls `gc.collect()` and `torch.cuda.empty_cache()` before exit. This ensures clean VRAM release in shared GPU environments where another container might be waiting for memory.
+
+---
+
+## Entry 0009 — Prometheus instrumentator vs manual metrics
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #30
+
+We use two layers of metrics: automatic HTTP instrumentation via `prometheus-fastapi-instrumentator` and custom TTS-specific metrics via `prometheus-client` directly.
+
+The instrumentator auto-adds request count, latency histograms, and response size metrics for every endpoint. This covers the "web server" dimension -- you can alert on 5xx rate, p99 latency, and throughput without writing any code.
+
+The custom metrics cover the "TTS engine" dimension that the instrumentator cannot see: `tts_inference_duration_seconds` measures only the model inference time (excluding queue wait and audio encoding), `tts_requests_total` breaks down by voice and format, and `tts_model_loaded` tracks whether the model is in VRAM. These are the metrics you actually need for capacity planning -- if inference duration is climbing, the GPU is under pressure; if model_loaded flaps between 0 and 1, the idle timeout is too aggressive.
+
+The implementation is gated behind `PROMETHEUS_ENABLED` and falls back gracefully if the packages are not installed. This keeps Prometheus as a soft dependency -- the server works without it.
