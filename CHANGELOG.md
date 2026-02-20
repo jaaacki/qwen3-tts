@@ -51,6 +51,30 @@
 ### Changed
 - Enable TF32 matmul and cuDNN TF32 on Ampere+ GPUs for ~3x faster matrix operations (#5)
 
+## [Unreleased — Issue #4: Add raw PCM streaming endpoint] — 2026-02-20
+### Added
+- `POST /v1/audio/speech/stream/pcm` — raw PCM streaming endpoint; splits text into sentences, streams each as raw int16 PCM bytes with `X-PCM-Sample-Rate`, `X-PCM-Bit-Depth`, `X-PCM-Channels` headers (#4)
+
+## [Unreleased — Issue #3: Add sentence-chunked SSE streaming] — 2026-02-20
+### Added
+- Sentence-chunked SSE streaming endpoint `POST /v1/audio/speech/stream` (#3)
+  - Splits input into sentences with abbreviation-aware regex
+  - Streams base64-encoded raw PCM (int16, 24kHz) via Server-Sent Events
+  - Sends `data: [DONE]` on completion, `data: [ERROR] message` on failure
+  - Updates `_last_used` per chunk to prevent idle unload during streaming
+
+## [Unreleased — Issue #2: Add adaptive max_new_tokens scaling] — 2026-02-20
+### Changed
+- Replace hardcoded `max_new_tokens: 2048` with adaptive scaling based on input text length (#2)
+  - Short inputs (<=16 words) get minimum budget of 128 tokens
+  - Budget scales at 8 tokens/word with a cap at 2048
+  - Reduces KV-cache allocation overhead by up to 40x for short texts
+
+## [Unreleased — Issue #1: Add per-request latency breakdown logging] — 2026-02-20
+### Added
+- Per-request latency breakdown logging via `logging.getLogger("qwen3-tts")` with `time.perf_counter()` timing in both `/v1/audio/speech` and `/v1/audio/speech/clone` endpoints (#1)
+- Logged fields: `queue_ms`, `inference_ms`, `encode_ms`, `total_ms`, `chars`, `voice`, `format`, `language`
+
 ## [Docs] 2026-02-20 — Improvement roadmap and project documentation
 
 ### Added

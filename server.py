@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import torch
@@ -15,6 +15,11 @@ import numpy as np
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
+import logging
+import base64
+import re
+
+logger = logging.getLogger("qwen3-tts")
 
 try:
     import pyrubberband as _pyrubberband
@@ -354,6 +359,14 @@ def detect_language(text: str) -> str:
     return _detect_language_unicode(text)
 
 
+def _adaptive_max_tokens(text: str) -> int:
+    """Scale token budget with text length to avoid over-allocating KV cache."""
+    cjk_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
+    if cjk_chars > len(text) * 0.3:
+        return max(128, min(2048, len(text) * 3))
+    return max(128, min(2048, len(text.split()) * 8))
+
+
 def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: float = -40.0) -> np.ndarray:
     """Trim leading and trailing silence from audio array."""
     if not VAD_TRIM:
@@ -413,6 +426,13 @@ def _adjust_speed(audio_data: np.ndarray, sample_rate: int, speed: float) -> np.
     return audio_data
 
 
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, aware of common abbreviations."""
+    pattern = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!)\s+'
+    sentences = re.split(pattern, text.strip())
+    return [s.strip() for s in sentences if s.strip()]
+
+
 def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
     with torch.inference_mode():
@@ -468,6 +488,7 @@ def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
     """OpenAI-compatible TTS endpoint using CustomVoice model."""
+    t_start = time.perf_counter()
     await _ensure_model_loaded()
 
     if not request.input or not request.input.strip():
@@ -476,12 +497,14 @@ async def synthesize_speech(request: TTSRequest):
     try:
         speaker = resolve_voice(request.voice)
         language = request.language or detect_language(request.input)
-        gen_kwargs = {"max_new_tokens": 2048}
+        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
         text = request.input.strip()
         text = _normalize_text(text)
 
+        t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
+            t_infer_start = time.perf_counter()
             wavs, sr = await asyncio.wait_for(
                 loop.run_in_executor(
                     _infer_executor,
@@ -489,6 +512,7 @@ async def synthesize_speech(request: TTSRequest):
                 ),
                 timeout=REQUEST_TIMEOUT
             )
+        t_infer_end = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
@@ -500,6 +524,22 @@ async def synthesize_speech(request: TTSRequest):
 
         audio_bytes, content_type = convert_audio_format(
             audio_data, sr, request.response_format
+        )
+        t_end = time.perf_counter()
+
+        logger.info(
+            "request_complete",
+            extra={
+                "endpoint": "/v1/audio/speech",
+                "queue_ms": round((t_infer_start - t_queue) * 1000, 1),
+                "inference_ms": round((t_infer_end - t_infer_start) * 1000, 1),
+                "encode_ms": round((t_end - t_infer_end) * 1000, 1),
+                "total_ms": round((t_end - t_start) * 1000, 1),
+                "chars": len(text),
+                "voice": speaker,
+                "format": request.response_format,
+                "language": language,
+            },
         )
 
         return Response(
@@ -518,6 +558,74 @@ async def synthesize_speech(request: TTSRequest):
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
 
 
+@app.post("/v1/audio/speech/stream")
+async def synthesize_speech_stream(request: TTSRequest):
+    """Sentence-chunked SSE streaming TTS endpoint."""
+    global _last_used
+    await _ensure_model_loaded()
+
+    if not request.input or not request.input.strip():
+        raise HTTPException(status_code=400, detail="Input text is required")
+
+    speaker = resolve_voice(request.voice)
+    language = request.language or detect_language(request.input)
+    text = request.input.strip()
+    sentences = _split_sentences(text)
+
+    if not sentences:
+        raise HTTPException(status_code=400, detail="No sentences found in input")
+
+    async def generate():
+        for sentence in sentences:
+            try:
+                gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+                loop = asyncio.get_running_loop()
+                async with _infer_semaphore:
+                    wavs, sr = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            _infer_executor,
+                            lambda s=sentence: _do_synthesize(
+                                s, language, speaker, gen_kwargs,
+                                instruct=request.instruct,
+                            )
+                        ),
+                        timeout=REQUEST_TIMEOUT,
+                    )
+
+                audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
+                if audio_data.ndim > 1:
+                    audio_data = audio_data.squeeze()
+
+                if request.speed != 1.0:
+                    new_length = int(len(audio_data) / request.speed)
+                    if new_length > 0:
+                        audio_data = scipy_signal.resample(audio_data, new_length)
+
+                audio_int16 = (audio_data * 32767).astype(np.int16)
+                pcm_bytes = audio_int16.tobytes()
+                yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
+
+                _last_used = time.time()
+
+            except asyncio.TimeoutError:
+                yield "data: [ERROR] Synthesis timed out\n\n"
+                return
+            except Exception as e:
+                yield f"data: [ERROR] {str(e)}\n\n"
+                return
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @app.post("/v1/audio/speech/clone")
 async def clone_voice(
     file: UploadFile = File(...),
@@ -527,6 +635,7 @@ async def clone_voice(
     response_format: str = Form("wav"),
 ):
     """Voice cloning endpoint - requires a reference audio file."""
+    t_start = time.perf_counter()
     await _ensure_model_loaded()
 
     if not input or not input.strip():
@@ -538,12 +647,14 @@ async def clone_voice(
         ref_audio_data, ref_sr = _get_cached_ref_audio(audio_bytes)
 
         language = language or detect_language(input)
-        gen_kwargs = {"max_new_tokens": 2048}
+        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
         text = input.strip()
         text = _normalize_text(text)
 
+        t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
+            t_infer_start = time.perf_counter()
             wavs, sr = await asyncio.wait_for(
                 loop.run_in_executor(
                     _infer_executor,
@@ -557,6 +668,7 @@ async def clone_voice(
                 ),
                 timeout=REQUEST_TIMEOUT
             )
+        t_infer_end = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
@@ -566,6 +678,21 @@ async def clone_voice(
 
         audio_bytes_out, content_type = convert_audio_format(
             audio_data, sr, response_format
+        )
+        t_end = time.perf_counter()
+
+        logger.info(
+            "request_complete",
+            extra={
+                "endpoint": "/v1/audio/speech/clone",
+                "queue_ms": round((t_infer_start - t_queue) * 1000, 1),
+                "inference_ms": round((t_infer_end - t_infer_start) * 1000, 1),
+                "encode_ms": round((t_end - t_infer_end) * 1000, 1),
+                "total_ms": round((t_end - t_start) * 1000, 1),
+                "chars": len(text),
+                "format": response_format,
+                "language": language,
+            },
         )
 
         return Response(
@@ -582,6 +709,70 @@ async def clone_voice(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
+
+
+@app.post("/v1/audio/speech/stream/pcm")
+async def synthesize_speech_stream_pcm(request: TTSRequest):
+    """Raw PCM streaming TTS endpoint — no SSE framing, no base64.
+
+    Splits text into sentences and streams each as raw int16 PCM bytes.
+    Headers report the audio format: 24000 Hz, 16-bit, mono.
+    """
+    global _last_used
+    await _ensure_model_loaded()
+
+    if not request.input or not request.input.strip():
+        raise HTTPException(status_code=400, detail="Input text is required")
+
+    speaker = resolve_voice(request.voice)
+    language = request.language or detect_language(request.input)
+    text = request.input.strip()
+    sentences = _split_sentences(text)
+    if not sentences:
+        raise HTTPException(status_code=400, detail="No sentences found in input")
+
+    async def pcm_generator():
+        global _last_used
+        for sentence in sentences:
+            gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+            loop = asyncio.get_running_loop()
+            try:
+                async with _infer_semaphore:
+                    wavs, sr = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            _infer_executor,
+                            lambda s=sentence: _do_synthesize(
+                                s, language, speaker, gen_kwargs
+                            ),
+                        ),
+                        timeout=REQUEST_TIMEOUT,
+                    )
+                _last_used = time.time()
+                audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
+                if audio_data.ndim > 1:
+                    audio_data = audio_data.squeeze()
+                if request.speed != 1.0:
+                    new_length = int(len(audio_data) / request.speed)
+                    if new_length > 0:
+                        audio_data = scipy_signal.resample(audio_data, new_length)
+                pcm_data = np.clip(audio_data, -1.0, 1.0)
+                pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
+                yield pcm_bytes
+            except asyncio.TimeoutError:
+                break
+            except Exception:
+                break
+
+    return StreamingResponse(
+        pcm_generator(),
+        media_type="application/octet-stream",
+        headers={
+            "X-PCM-Sample-Rate": "24000",
+            "X-PCM-Bit-Depth": "16",
+            "X-PCM-Channels": "1",
+            "Content-Disposition": 'attachment; filename="speech.pcm"',
+        },
+    )
 
 
 if __name__ == "__main__":

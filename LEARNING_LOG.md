@@ -240,6 +240,15 @@ The `TORCH_COMPILE` env var (default true) provides an escape hatch for environm
 
 ---
 
+## Entry 0012 — SSE streaming: base64 PCM over text/event-stream
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: Issue #3
+
+The streaming endpoint sends audio as base64-encoded raw PCM inside SSE events. This was chosen over chunked WAV (which requires a RIFF header with total data size, impossible for streaming) and raw binary HTTP chunks (no framing protocol, client must guess byte boundaries). SSE gives us text-based framing with `data:` prefix and `\n\n` delimiters, plus built-in reconnection semantics. Base64 adds ~33% overhead but keeps the protocol clean — for zero-overhead binary streaming, issue #4 adds a separate raw PCM endpoint. The `_last_used` update per chunk prevents the idle watchdog from unloading the model mid-stream.
+
+---
+
 ## Entry 0011 — TF32: why it is safe for this model
 **Date**: 2026-02-20
 **Type**: Why this design
