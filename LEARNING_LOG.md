@@ -4,6 +4,19 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0012 — GPU memory pool pre-warming and CUDA allocator tuning
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #16 — Pre-allocate GPU memory pool to reduce allocation jitter
+
+CUDA memory allocation is lazy by default. The first time a tensor of a given size is allocated, the CUDA allocator calls `cudaMalloc`, which involves a kernel-mode transition and device synchronization. This takes 1-5ms per allocation. For a TTS server handling its first request after model load, there are multiple novel allocation sizes (KV-cache, attention intermediates, audio output buffers), each paying this penalty. The cumulative cost can add 10-30ms to the first inference.
+
+The fix is a dummy allocation: after warmup, allocate a 128 MB tensor (`torch.empty(64*1024*1024, dtype=bfloat16, device="cuda")`) and immediately delete it. This forces the CUDA allocator to reserve a contiguous 128 MB block in its free pool. Subsequent allocations that fit within this block are served from the pool without `cudaMalloc` calls.
+
+The `max_split_size_mb:512` addition to `PYTORCH_CUDA_ALLOC_CONF` prevents the allocator from splitting large cached blocks into small fragments. Without this, the allocator might split a 128 MB cached block into many small pieces to serve a 1 MB request, then not be able to recombine them when a 64 MB request arrives.
+
+---
+
 ## Entry 0008 — Why pitch-preserving time stretch matters for TTS
 **Date**: 2026-02-20
 **Type**: Why this design

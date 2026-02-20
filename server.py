@@ -175,6 +175,16 @@ def _load_model_sync():
         # Clear warmup allocations so steady-state VRAM is clean
         _release_gpu_full()
 
+        # Pre-warm CUDA memory pool — allocate and free a large tensor so the
+        # allocator pre-reserves a contiguous block, reducing first-request jitter
+        print("Pre-warming CUDA memory pool...")
+        try:
+            dummy = torch.empty(64 * 1024 * 1024, dtype=torch.bfloat16, device="cuda")
+            del dummy
+            print("  Allocated and freed 128 MB dummy tensor")
+        except Exception as e:
+            print(f"  CUDA pool pre-warm failed: {e}")
+
     _last_used = time.time()
     print(f"Model loaded: {model_id}")
     if torch.cuda.is_available():

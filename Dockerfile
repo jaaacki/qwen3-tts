@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # CUDA memory allocator tuning — reduce fragmentation for shared GPU
-ENV PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+ENV PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
 ENV TOKENIZERS_PARALLELISM=false
 
 # Limit CPU thread spawning — GPU does the heavy work, excess threads just contend
