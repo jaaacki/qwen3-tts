@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased — Issue #23: Transparent huge pages] — 2026-02-20
+### Added
+- **Transparent huge pages** — `docker-entrypoint.sh` attempts to enable THP madvise mode at container startup; reduces TLB pressure for model weights (#23)
+- **`docker-entrypoint.sh`** — shell entrypoint for system tuning before uvicorn starts; consolidation point for #25 (HTTP/2) and #26 (UDS) startup logic (#23)
+### Changed
+- Dockerfile now uses ENTRYPOINT with shell script instead of CMD array (#23)
+
 ## [Unreleased — Issue #22: CPU affinity for inference thread] — 2026-02-20
 ### Added
 - **CPU affinity for inference** — `INFERENCE_CPU_CORES` env var pins process to GPU-adjacent cores via `os.sched_setaffinity()` (#22)
