@@ -314,3 +314,16 @@ The instrumentator auto-adds request count, latency histograms, and response siz
 The custom metrics cover the "TTS engine" dimension that the instrumentator cannot see: `tts_inference_duration_seconds` measures only the model inference time (excluding queue wait and audio encoding), `tts_requests_total` breaks down by voice and format, and `tts_model_loaded` tracks whether the model is in VRAM. These are the metrics you actually need for capacity planning -- if inference duration is climbing, the GPU is under pressure; if model_loaded flaps between 0 and 1, the idle timeout is too aggressive.
 
 The implementation is gated behind `PROMETHEUS_ENABLED` and falls back gracefully if the packages are not installed. This keeps Prometheus as a soft dependency -- the server works without it.
+
+---
+
+## Entry 0014 — jemalloc: why the default allocator causes RSS bloat
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #21
+
+Python's default memory allocator (glibc ptmalloc2) uses per-thread arenas to reduce lock contention. Each arena independently allocates and frees memory from the OS. The problem: when a thread frees a block, the arena may not return the underlying pages to the OS if adjacent blocks are still allocated. Over hours of operation with many small allocations (tokenizer strings, audio buffers, numpy intermediates), the RSS grows 2-3x beyond actual usage.
+
+jemalloc uses a different strategy: size-class segregated regions with background thread compaction. The `dirty_decay_ms=1000` setting tells jemalloc to return freed pages to the OS within 1 second. `muzzy_decay_ms=0` tells it to immediately decommit pages rather than keeping them as "muzzy" (mapped but uncommitted). `background_thread:true` enables a dedicated thread that handles the decay without blocking application threads.
+
+The LD_PRELOAD approach is the least invasive: the application code is unchanged, the allocator swap happens at process startup, and removing the env var reverts to ptmalloc2. No server.py changes needed.

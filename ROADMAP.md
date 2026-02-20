@@ -48,7 +48,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [ ] #18 Add Opus codec support for streaming
 - [ ] #19 Add GPU-accelerated audio processing with torchaudio
 - [ ] #20 Add async audio encode pipeline (overlap encode N with synthesis N+1)
-- [ ] #21 Add jemalloc memory allocator via `LD_PRELOAD`
+- [x] #21 Add jemalloc memory allocator via `LD_PRELOAD`
 - [ ] #22 Set CPU affinity for inference thread to GPU-adjacent cores
 - [ ] #23 Enable transparent huge pages for model weights
 - [ ] #24 Add WebSocket streaming endpoint
