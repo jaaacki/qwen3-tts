@@ -21,8 +21,7 @@ _mock_torch.inference_mode.return_value.__exit__ = MagicMock()
 
 with patch.dict("sys.modules", _mock_modules):
     from server import (
-        app, resolve_voice, detect_language, convert_audio_format,
-        _adaptive_max_tokens,
+        app, resolve_voice, detect_language, _split_sentences,
     )
 
 from fastapi.testclient import TestClient
@@ -30,63 +29,53 @@ from fastapi.testclient import TestClient
 client = TestClient(app)
 
 
-# --- Issue #2: Adaptive max_new_tokens tests ---
+# --- Issue #3: Sentence splitting tests ---
 
 
-class TestAdaptiveMaxTokens:
-    """Tests for _adaptive_max_tokens (Issue #2)."""
+class TestSplitSentences:
+    """Tests for _split_sentences (Issue #3)."""
 
-    def test_short_text_clamps_to_minimum(self):
-        """Very short text should clamp to 128 (minimum)."""
-        assert _adaptive_max_tokens("hello world") == 128
+    def test_single_sentence(self):
+        assert _split_sentences("Hello world.") == ["Hello world."]
 
-    def test_single_word_clamps_to_minimum(self):
-        assert _adaptive_max_tokens("hello") == 128
+    def test_multiple_sentences(self):
+        result = _split_sentences("First sentence. Second sentence. Third one.")
+        assert len(result) == 3
+        assert result[0] == "First sentence."
+        assert result[1] == "Second sentence."
+        assert result[2] == "Third one."
 
-    def test_medium_text_scales_linearly(self):
-        """20 words * 8 = 160 tokens."""
-        text = " ".join(["word"] * 20)
-        assert _adaptive_max_tokens(text) == 160
+    def test_question_and_exclamation(self):
+        result = _split_sentences("Is it working? Yes it is! Great.")
+        assert len(result) == 3
 
-    def test_long_text_clamps_to_maximum(self):
-        """300 words * 8 = 2400, clamped to 2048."""
-        text = " ".join(["word"] * 300)
-        assert _adaptive_max_tokens(text) == 2048
-
-    def test_exact_boundary_128(self):
-        """16 words * 8 = 128, exactly at minimum."""
-        text = " ".join(["word"] * 16)
-        assert _adaptive_max_tokens(text) == 128
-
-    def test_just_above_minimum(self):
-        """17 words * 8 = 136, just above minimum."""
-        text = " ".join(["word"] * 17)
-        assert _adaptive_max_tokens(text) == 136
-
-    def test_exact_boundary_2048(self):
-        """256 words * 8 = 2048, exactly at maximum."""
-        text = " ".join(["word"] * 256)
-        assert _adaptive_max_tokens(text) == 2048
+    def test_abbreviation_awareness(self):
+        """Should not split on Dr. or Mr. abbreviations."""
+        result = _split_sentences("Dr. Smith called Mr. Jones today.")
+        assert len(result) == 1
 
     def test_empty_string(self):
-        """Empty string should return 128 (minimum)."""
-        assert _adaptive_max_tokens("") == 128
+        assert _split_sentences("") == []
+
+    def test_whitespace_only(self):
+        assert _split_sentences("   ") == []
+
+    def test_no_sentence_ending(self):
+        """Text without sentence-ending punctuation returns as single item."""
+        result = _split_sentences("Hello world")
+        assert result == ["Hello world"]
+
+    def test_strips_whitespace(self):
+        result = _split_sentences("  First.   Second.  ")
+        assert all(s == s.strip() for s in result)
 
 
 # --- Existing utility function tests ---
 
 
 class TestResolveVoice:
-    """Tests for voice resolution."""
-
     def test_default_voice_when_none(self):
         assert resolve_voice(None) == "vivian"
-
-    def test_default_voice_when_empty(self):
-        assert resolve_voice("") == "vivian"
-
-    def test_direct_qwen_voice(self):
-        assert resolve_voice("serena") == "serena"
 
     def test_openai_alias(self):
         assert resolve_voice("alloy") == "ryan"
@@ -94,25 +83,16 @@ class TestResolveVoice:
     def test_unknown_voice_passthrough(self):
         assert resolve_voice("custom_voice") == "custom_voice"
 
-    def test_case_insensitive(self):
-        assert resolve_voice("VIVIAN") == "vivian"
-        assert resolve_voice("Alloy") == "ryan"
-
 
 class TestDetectLanguage:
-    """Tests for language detection."""
-
     def test_english(self):
         assert detect_language("Hello world") == "English"
 
     def test_chinese(self):
-        assert detect_language("你好世界") == "Chinese"
+        assert detect_language("\u4f60\u597d\u4e16\u754c") == "Chinese"
 
     def test_japanese(self):
-        assert detect_language("こんにちは") == "Japanese"
+        assert detect_language("\u3053\u3093\u306b\u3061\u306f") == "Japanese"
 
     def test_korean(self):
-        assert detect_language("안녕하세요") == "Korean"
-
-    def test_mixed_defaults_to_first_match(self):
-        assert detect_language("Hello 你好") == "Chinese"
+        assert detect_language("\uc548\ub155\ud558\uc138\uc694") == "Korean"

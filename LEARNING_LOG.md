@@ -136,3 +136,12 @@ The improvement plan includes three layers of caching, and the ordering from hig
 The ordering matters for implementation priority. The output cache collapses the entire pipeline for repeated requests — inference, audio encoding, everything. One dict lookup replaces all of it. The voice prompt cache only saves preprocessing. The KV cache only saves part of inference. In terms of implementation effort, the output cache is roughly 20 lines of code. The voice prompt cache is similar. The KV cache is an open research question.
 
 For the phone call use case, the realistic expectation is that the output cache provides the majority of the benefit. IVR menus, hold messages, greeting phrases, and common system responses repeat constantly. A deployment serving 1000 calls per day with 20 unique system phrases would see cache hit rates above 90% after the first few calls. The per-request cost drops from 500ms of GPU inference to 1ms of memory lookup.
+
+---
+
+## Entry 0008 — SSE streaming: base64 PCM over text/event-stream
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: Issue #3
+
+The streaming endpoint sends audio as base64-encoded raw PCM inside SSE events. This was chosen over chunked WAV (which requires a RIFF header with total data size, impossible for streaming) and raw binary HTTP chunks (no framing protocol, client must guess byte boundaries). SSE gives us text-based framing with `data:` prefix and `\n\n` delimiters, plus built-in reconnection semantics. Base64 adds ~33% overhead but keeps the protocol clean — for zero-overhead binary streaming, issue #4 adds a separate raw PCM endpoint. The `_last_used` update per chunk prevents the idle watchdog from unloading the model mid-stream.

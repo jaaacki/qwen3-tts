@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import torch
@@ -13,6 +13,8 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
 import logging
+import base64
+import re
 
 logger = logging.getLogger("qwen3-tts")
 
@@ -291,6 +293,13 @@ def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: flo
     return audio[start:end]
 
 
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, aware of common abbreviations."""
+    pattern = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!)\s+'
+    sentences = re.split(pattern, text.strip())
+    return [s.strip() for s in sentences if s.strip()]
+
+
 def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
     with torch.inference_mode():
@@ -391,6 +400,74 @@ async def synthesize_speech(request: TTSRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+
+
+@app.post("/v1/audio/speech/stream")
+async def synthesize_speech_stream(request: TTSRequest):
+    """Sentence-chunked SSE streaming TTS endpoint."""
+    global _last_used
+    await _ensure_model_loaded()
+
+    if not request.input or not request.input.strip():
+        raise HTTPException(status_code=400, detail="Input text is required")
+
+    speaker = resolve_voice(request.voice)
+    language = request.language or detect_language(request.input)
+    text = request.input.strip()
+    sentences = _split_sentences(text)
+
+    if not sentences:
+        raise HTTPException(status_code=400, detail="No sentences found in input")
+
+    async def generate():
+        for sentence in sentences:
+            try:
+                gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+                loop = asyncio.get_running_loop()
+                async with _infer_semaphore:
+                    wavs, sr = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            _infer_executor,
+                            lambda s=sentence: _do_synthesize(
+                                s, language, speaker, gen_kwargs,
+                                instruct=request.instruct,
+                            )
+                        ),
+                        timeout=REQUEST_TIMEOUT,
+                    )
+
+                audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
+                if audio_data.ndim > 1:
+                    audio_data = audio_data.squeeze()
+
+                if request.speed != 1.0:
+                    new_length = int(len(audio_data) / request.speed)
+                    if new_length > 0:
+                        audio_data = scipy_signal.resample(audio_data, new_length)
+
+                audio_int16 = (audio_data * 32767).astype(np.int16)
+                pcm_bytes = audio_int16.tobytes()
+                yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
+
+                _last_used = time.time()
+
+            except asyncio.TimeoutError:
+                yield "data: [ERROR] Synthesis timed out\n\n"
+                return
+            except Exception as e:
+                yield f"data: [ERROR] {str(e)}\n\n"
+                return
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 @app.post("/v1/audio/speech/clone")
