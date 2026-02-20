@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #19: GPU-accelerated audio with torchaudio] — 2026-02-20
+### Added
+- **torchaudio integration** — WAV encoding via `torchaudio.save()` and GPU-accelerated speed adjustment via `torchaudio.functional.resample()` with CUDA tensor; falls back to soundfile/scipy on CPU-only hosts (#19)
+- Note: speed adjustment via resample changes both duration and pitch (same as scipy); pitch-preserving speed is covered by issue #14 (pyrubberband)
+
 ## [Unreleased — Issue #18: Opus codec support] — 2026-02-20
 ### Added
 - **Opus codec support** — `response_format=opus` via pydub/ffmpeg libopus at 32kbps; 2.5ms encode latency vs ~50ms for MP3 (#18)
