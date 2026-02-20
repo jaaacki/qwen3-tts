@@ -140,6 +140,7 @@ Environment variables in `compose.yaml`:
 | `VOICE_CACHE_MAX` | `32` | LRU cache capacity for processed voice clone reference audio (0 = disabled) |
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of on first request |
 | `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics at `GET /metrics` |
+| `INFERENCE_CPU_CORES` | *(empty)* | Pin to specific CPU cores (e.g., `0-7`). Empty = no pinning |
 
 The model cache is persisted to `./models` via volume mount.
 

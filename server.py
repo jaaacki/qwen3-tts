@@ -72,6 +72,7 @@ async def lifespan(app):
     # Startup
     if _prometheus_available:
         Instrumentator().instrument(app).expose(app)
+    _set_cpu_affinity()
     asyncio.create_task(_idle_watchdog())
     if PRELOAD_MODEL:
         print("PRELOAD_MODEL=true: loading model at startup")
@@ -312,6 +313,18 @@ async def _idle_watchdog():
                 if model is not None and time.time() - _last_used > IDLE_TIMEOUT:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(_infer_executor, _unload_model_sync)
+
+
+def _set_cpu_affinity():
+    """Pin process to GPU-adjacent CPU cores for better cache locality."""
+    affinity_cores = os.getenv("INFERENCE_CPU_CORES", "")
+    if not affinity_cores:
+        return
+    try:
+        os.system(f"taskset -p -c {affinity_cores} {os.getpid()} 2>/dev/null || true")
+        print(f"CPU affinity set: cores {affinity_cores}")
+    except Exception as e:
+        print(f"Could not set CPU affinity: {e}")
 
 
 @app.get("/health")

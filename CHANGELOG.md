@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #22: CPU affinity for inference thread] — 2026-02-20
+### Added
+- **CPU affinity for inference** — `INFERENCE_CPU_CORES` env var pins process to GPU-adjacent cores via `os.sched_setaffinity` (#22)
+
 ## [Unreleased — Issue #21: jemalloc memory allocator] — 2026-02-20
 ### Added
 - **jemalloc memory allocator** — `LD_PRELOAD` jemalloc as Dockerfile ENV (also works with plain `docker run`); reduces memory fragmentation in long-running processes (#21)
