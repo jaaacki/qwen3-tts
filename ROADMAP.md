@@ -47,7 +47,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [x] #17 Add full audio output LRU cache (text+voice to cached bytes)
 - [x] #18 Add Opus codec support for streaming
 - [x] #19 Add GPU-accelerated audio processing with torchaudio
-- [ ] #20 Add async audio encode pipeline (overlap encode N with synthesis N+1)
+- [x] #20 Add async audio encode pipeline (overlap encode N with synthesis N+1)
 - [x] #21 Add jemalloc memory allocator via `LD_PRELOAD`
 - [x] #22 Set CPU affinity for inference thread to GPU-adjacent cores
 - [x] #23 Enable transparent huge pages for model weights

@@ -12,14 +12,13 @@ import gc
 import asyncio
 import time
 import re
-import hashlib
 import numpy as np
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+import re as _re
 import scipy.signal as scipy_signal
 import logging
 import base64
-import re
 
 logger = logging.getLogger("qwen3-tts")
 
@@ -27,8 +26,6 @@ try:
     import pyrubberband as _pyrubberband
 except ImportError:
     _pyrubberband = None
-
-logger = logging.getLogger("qwen3-tts")
 
 # Prometheus metrics (optional — enabled by default)
 PROMETHEUS_ENABLED = os.getenv("PROMETHEUS_ENABLED", "true").lower() in ("true", "1")
@@ -99,6 +96,9 @@ loaded_model_id = None
 
 # Single-thread executor for GPU inference — avoids default pool overhead
 _infer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-infer")
+
+# CPU executor for audio encoding — runs in parallel with GPU inference
+_encode_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts-encode")
 
 # Semaphore to serialize GPU inference — prevents OOM with concurrent requests
 _infer_semaphore = asyncio.Semaphore(1)
@@ -616,6 +616,15 @@ def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
     return wavs, sr
 
 
+async def _encode_audio_async(audio_data, sample_rate, output_format):
+    """Run audio encoding in the CPU thread pool, overlapping with GPU work."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _encode_executor,
+        lambda: convert_audio_format(audio_data, sample_rate, output_format)
+    )
+
+
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
     """OpenAI-compatible TTS endpoint using CustomVoice model."""
@@ -668,7 +677,7 @@ async def synthesize_speech(request: TTSRequest):
 
         audio_data = _adjust_speed(audio_data, sr, request.speed)
 
-        audio_bytes, content_type = convert_audio_format(
+        audio_bytes, content_type = await _encode_audio_async(
             audio_data, sr, request.response_format
         )
         t_end = time.perf_counter()
@@ -828,7 +837,7 @@ async def clone_voice(
 
         audio_data = _trim_silence(audio_data, sr)
 
-        audio_bytes_out, content_type = convert_audio_format(
+        audio_bytes_out, content_type = await _encode_audio_async(
             audio_data, sr, response_format
         )
         t_end = time.perf_counter()

@@ -363,3 +363,12 @@ Opus at 32kbps is near-transparent quality for mono speech. The codec was design
 **Related**: Issue #19
 
 The torchaudio integration replaces soundfile for WAV encoding and scipy for speed-adjustment resampling. The key insight is that torchaudio's `resample()` operates on CUDA tensors, keeping the audio data on GPU and avoiding a CPU round-trip. On Ampere+ GPUs, the polyphase resampling kernel runs significantly faster than scipy's CPU-bound FFT-based resample. The implementation moves the audio tensor to CUDA before resampling and back to CPU only for the final encoding step. On CPU-only hosts, torchaudio still runs on CPU (faster than scipy due to optimized C++ kernels) with a graceful fallback to scipy if torchaudio is not installed. Important caveat: `torchaudio.functional.resample()` changes sample rate, which changes both duration AND pitch — identical behavior to scipy. It is NOT pitch-preserving. Issue #14 (pyrubberband) is the pitch-preserving solution. The base PyTorch Docker image may already include torchaudio; the Dockerfile pip install is a safeguard but could cause version mismatches — verify inside the container.
+
+---
+
+## Entry 0019 — Async encode pipeline: infrastructure before overlap
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #20
+
+The async encode pipeline moves audio format conversion (WAV/MP3/FLAC/OGG encoding) from the main event loop thread into a dedicated 2-thread CPU executor. This is infrastructure, not the full optimization. The full optimization is: while encoding sentence N on a CPU thread, start synthesizing sentence N+1 on the GPU. That requires the streaming endpoints from Phase 1 (#3/#4). Without streaming, there is only one inference per request, so encoding overlap has limited benefit for single-sentence requests. For multi-sentence streaming, the pipeline overlap could reduce total latency by 20-40ms per sentence (the encoding time that would otherwise gate the next synthesis). The `_split_sentences` helper is included here because it is the natural boundary for chunking. The `import re` was moved to the top of the file per Python convention — inline imports are confusing.
