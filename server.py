@@ -268,6 +268,9 @@ def detect_language(text: str) -> str:
 
 def _adaptive_max_tokens(text: str) -> int:
     """Scale token budget with text length to avoid over-allocating KV cache."""
+    cjk_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
+    if cjk_chars > len(text) * 0.3:
+        return max(128, min(2048, len(text) * 3))
     return max(128, min(2048, len(text.split()) * 8))
 
 
