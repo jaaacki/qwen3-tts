@@ -29,7 +29,7 @@ ENV MKL_NUM_THREADS=2
 
 # Install runtime-only system dependencies (no git, no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsndfile1 ffmpeg sox rubberband-cli \
+    libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder

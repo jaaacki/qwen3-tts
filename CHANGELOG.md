@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased — Issue #21: jemalloc memory allocator] — 2026-02-20
+### Added
+- **jemalloc memory allocator** — `LD_PRELOAD` jemalloc in compose.yaml; reduces memory fragmentation in long-running processes (#21)
+- **`MALLOC_CONF`** — jemalloc tuning: background thread, 1s dirty decay, immediate muzzy decay (#21)
+- Note: LD_PRELOAD path assumes x86_64 Linux; adjust for aarch64 deployments
+
 ## [Unreleased — Issue #29: Add ipc:host for CUDA IPC] — 2026-02-20
 ### Changed
 - Added `ipc: host` to Docker compose for CUDA IPC namespace sharing (#29)
