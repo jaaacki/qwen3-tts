@@ -27,6 +27,11 @@ ENV TOKENIZERS_PARALLELISM=false
 ENV OMP_NUM_THREADS=2
 ENV MKL_NUM_THREADS=2
 
+# jemalloc replaces ptmalloc2 to reduce RSS bloat from arena fragmentation
+# Path assumes x86_64 Linux; for aarch64 use /usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
+
 # Install runtime-only system dependencies (no git, no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 \
