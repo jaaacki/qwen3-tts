@@ -15,4 +15,16 @@ if ! nvidia-smi --lock-gpu-clocks=0,9999 2>/dev/null; then
   fi
 fi
 
+# Enable transparent huge pages if running with sufficient privileges
+# THP reduces TLB pressure for large model weights (~2.4GB = thousands of 4KB pages -> fewer 2MB pages)
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null && \
+    echo "THP: enabled (madvise)" || true
+echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null && \
+    echo "THP defrag: defer+madvise" || true
+
+# Check jemalloc
+if [ -n "$LD_PRELOAD" ] && [ -f "$LD_PRELOAD" ]; then
+    echo "jemalloc loaded: $LD_PRELOAD"
+fi
+
 exec "$@"

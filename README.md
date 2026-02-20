@@ -144,6 +144,17 @@ Environment variables in `compose.yaml`:
 
 The model cache is persisted to `./models` via volume mount.
 
+### Transparent Huge Pages (optional)
+
+For optimal model loading performance, enable THP on the Docker host:
+
+```bash
+echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo defer+madvise | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+```
+
+The container attempts to set these at startup but may need `--privileged` or appropriate capabilities. If the host already has THP enabled, no container privileges are needed.
+
 ### GPU Memory Management
 
 The model loads **on-demand** with the first request and automatically **unloads after idle timeout** to free VRAM for other services. This is ideal for shared GPU environments.
