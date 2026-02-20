@@ -3,6 +3,8 @@
 ## [Unreleased — Issue #26: Unix domain socket support] — 2026-02-20
 ### Added
 - **Unix domain socket support** — `UNIX_SOCKET_PATH` env var enables UDS mode, bypassing TCP stack for same-host clients (#26)
+- Note: UDS mode disables TCP binding — cannot use both simultaneously. Use `curl --unix-socket` syntax for UDS.
+- Note: CMD logic should be consolidated into `docker-entrypoint.sh` from #23 during milestone merge
 
 ## [Unreleased — Issue #25: HTTP/2 support] — 2026-02-20
 ### Added

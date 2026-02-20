@@ -390,3 +390,12 @@ Two bugs were caught in review. First, the sentence-splitting regex `(?<=[.!?])\
 **Related**: Issue #25
 
 HTTP/2 requires TLS in practice. While the spec defines h2c (cleartext HTTP/2), browsers and most HTTP clients do not support it. The `h2` package provides the protocol implementation, but uvicorn only negotiates HTTP/2 via ALPN during the TLS handshake. Without TLS certificates, the server runs plain HTTP/1.1 — the `h2` package sits unused but harmless. The practical benefits of HTTP/2 for a TTS server are modest: header compression saves a few bytes per request, and multiplexing allows concurrent requests on one connection. For most TTS workloads (single request, wait for audio, play), HTTP/1.1 is sufficient. The value comes in multi-tenant deployments where many clients connect through a load balancer — fewer TCP connections and faster header processing. The docker-entrypoint.sh appends conditional TLS flags when SSL env vars are set, keeping the ENTRYPOINT pattern from #23 intact.
+
+---
+
+## Entry 0022 — Unix domain sockets: when to bypass TCP
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #26
+
+UDS removes the TCP/IP stack overhead for same-host communication: no three-way handshake, no Nagle buffering, no checksumming. For a TTS server called by a local proxy or application, this saves 1-2ms per request (meaningful when the goal is sub-100ms time-to-first-byte for cached responses). The tradeoff: UDS and TCP are mutually exclusive — when `UNIX_SOCKET_PATH` is set, uvicorn binds only to the socket file, not to a TCP port. This means external clients cannot reach the service over the network. The intended deployment is behind a reverse proxy (nginx, caddy) that listens on TCP and forwards to the UDS. The `docker-entrypoint.sh` checks `UNIX_SOCKET_PATH` first and execs uvicorn with `--uds`, consolidating all startup logic in the entrypoint script.
