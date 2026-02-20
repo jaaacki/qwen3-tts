@@ -23,7 +23,7 @@ Before optimizing anything, we instrument. Then we remove the biggest bottleneck
 
 GPU tuning flags come first because they are low-risk and establish a faster baseline for benchmarking everything after. Inference optimizations build on that baseline. Audio quality improvements come last in the phase because they depend on a stable, fast inference path.
 
-- [ ] #5 Enable TF32 matmul mode
+- [x] #5 Enable TF32 matmul mode
 - [ ] #6 Enable GPU persistence mode
 - [ ] #7 Lock GPU clocks to max boost
 - [ ] #8 Switch `attn_implementation` to `flash_attention_2`

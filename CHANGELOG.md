@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.3] — 2026-02-20
+### Changed
+- Enable TF32 matmul and cuDNN TF32 on Ampere+ GPUs for ~3x faster matrix operations (#5)
+
 ## [Docs] 2026-02-20 — Improvement roadmap and project documentation
 
 ### Added
