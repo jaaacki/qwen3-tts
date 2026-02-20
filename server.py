@@ -409,7 +409,7 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
             audio_segment = _PydubAudioSegment.from_wav(wav_buffer)
             audio_segment.export(
                 buffer, format="opus", codec="libopus",
-                parameters=["-b:a", "64k"]
+                parameters=["-b:a", "32k"]
             )
             content_type = "audio/opus"
         else:

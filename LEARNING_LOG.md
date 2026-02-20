@@ -345,3 +345,12 @@ The original implementation used `os.system(f"taskset -p -c {cores} {pid}")` whi
 **Related**: Issue #23
 
 THP `madvise` mode is chosen over `always` because `always` can cause latency spikes from compaction pauses and memory bloat in allocations that do not benefit from large pages (e.g., small Python objects). With `madvise`, only memory regions explicitly marked with `madvise(MADV_HUGEPAGE)` — or large anonymous mappings like PyTorch model weights — get backed by 2MB pages. The model weights (~2.4GB) consist of thousands of 4KB pages; mapping them as 2MB pages reduces TLB entries from ~600K to ~1200, significantly reducing TLB miss overhead during inference. The `defrag: defer+madvise` setting tells the kernel to defer compaction to a background thread rather than stalling the allocating process. All THP writes in the entrypoint are non-fatal (`|| true`) because the sysfs paths may be read-only in containers without `--privileged` or SYS_ADMIN capability.
+
+---
+
+## Entry 0017 — Opus codec: bitrate choice for speech
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #18
+
+Opus at 32kbps is near-transparent quality for mono speech. The codec was designed specifically for speech and handles it well at low bitrates. We chose 32kbps over the original 64kbps spec because: (1) doubling the bitrate provides no perceptible quality improvement for single-speaker TTS audio, (2) lower bitrate halves bandwidth for streaming use cases, and (3) Opus at 32kbps still comfortably exceeds the quality of telephone-grade audio (8kbps G.711). The encoding path goes through a WAV intermediate via pydub (same as the existing MP3 path), which adds ~20ms overhead. A future optimization could pipe raw PCM directly to ffmpeg's Opus encoder, bypassing the WAV round-trip. The Dockerfile installs `libopus-dev` for build-time compilation support; multi-stage builds should use `libopus0` in the runtime stage to avoid shipping unnecessary header files.
