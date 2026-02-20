@@ -21,6 +21,8 @@ except ImportError:
 # Enable cudnn autotuner — finds fastest convolution algorithms for the GPU
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True   # 3x faster matmul on Ampere+ GPUs
+    torch.backends.cudnn.allow_tf32 = True           # enable TF32 for cuDNN ops
 
 app = FastAPI(title="Qwen3-TTS API")
 
