@@ -2,7 +2,10 @@
 
 ## [Unreleased — Issue #22: CPU affinity for inference thread] — 2026-02-20
 ### Added
-- **CPU affinity for inference** — `INFERENCE_CPU_CORES` env var pins process to GPU-adjacent cores via `os.sched_setaffinity` (#22)
+- **CPU affinity for inference** — `INFERENCE_CPU_CORES` env var pins process to GPU-adjacent cores via `os.sched_setaffinity()` (#22)
+
+### Security
+- Uses `os.sched_setaffinity()` instead of `os.system(taskset)` to prevent command injection via env var
 
 ## [Unreleased — Issue #21: jemalloc memory allocator] — 2026-02-20
 ### Added
