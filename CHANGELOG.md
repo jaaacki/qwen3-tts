@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #33: Migrate @app.on_event to FastAPI lifespan] — 2026-02-20
+### Changed
+- Migrated from deprecated `@app.on_event("startup")` to FastAPI lifespan context manager (#33)
+- Server now performs graceful model unload on shutdown via lifespan teardown
+
 ## [Unreleased — Issue #17: Audio output LRU cache] — 2026-02-20
 ### Added
 - Audio output LRU cache — in-memory cache keyed by SHA-256 of (text, voice, speed, format, language, instruct); cache hit returns bytes in ~1ms, skipping GPU entirely (#17)

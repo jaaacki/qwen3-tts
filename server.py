@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -38,7 +39,18 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True   # 3x faster matmul on Ampere+ GPUs
     torch.backends.cudnn.allow_tf32 = True           # enable TF32 for cuDNN ops
 
-app = FastAPI(title="Qwen3-TTS API")
+@asynccontextmanager
+async def lifespan(app):
+    # Startup
+    asyncio.create_task(_idle_watchdog())
+    print("Server started")
+    yield
+    # Shutdown
+    print("Server shutting down")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_infer_executor, _unload_model_sync)
+
+app = FastAPI(title="Qwen3-TTS API", lifespan=lifespan)
 
 model = None
 loaded_model_id = None
@@ -262,11 +274,6 @@ async def _idle_watchdog():
                 if model is not None and time.time() - _last_used > IDLE_TIMEOUT:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(_infer_executor, _unload_model_sync)
-
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(_idle_watchdog())
 
 
 @app.get("/health")
