@@ -24,37 +24,42 @@ def clear_cache():
 class TestAudioCacheKey:
     def test_deterministic(self):
         """Same inputs produce the same cache key."""
-        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
-        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
         assert k1 == k2
 
     def test_different_text_produces_different_key(self):
-        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
-        k2 = _audio_cache_key("world", "vivian", 1.0, "wav", "")
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("world", "vivian", 1.0, "wav", "English", "")
         assert k1 != k2
 
     def test_different_voice_produces_different_key(self):
-        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
-        k2 = _audio_cache_key("hello", "ryan", 1.0, "wav", "")
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "ryan", 1.0, "wav", "English", "")
         assert k1 != k2
 
     def test_different_speed_produces_different_key(self):
-        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
-        k2 = _audio_cache_key("hello", "vivian", 1.5, "wav", "")
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.5, "wav", "English", "")
         assert k1 != k2
 
     def test_different_format_produces_different_key(self):
-        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
-        k2 = _audio_cache_key("hello", "vivian", 1.0, "mp3", "")
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.0, "mp3", "English", "")
+        assert k1 != k2
+
+    def test_different_language_produces_different_key(self):
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "Chinese", "")
         assert k1 != k2
 
     def test_different_instruct_produces_different_key(self):
-        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
-        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "speak slowly")
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "speak slowly")
         assert k1 != k2
 
     def test_key_is_sha256_hex(self):
-        key = _audio_cache_key("hello", "vivian", 1.0, "wav", "")
+        key = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
         assert len(key) == 64
         int(key, 16)  # valid hex
 

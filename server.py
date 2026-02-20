@@ -52,8 +52,8 @@ _AUDIO_CACHE_MAX = int(os.getenv("AUDIO_CACHE_MAX", "256"))
 _audio_cache: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
 
 
-def _audio_cache_key(text: str, voice: str, speed: float, fmt: str, instruct: str = "") -> str:
-    raw = f"{text}|{voice}|{speed}|{fmt}|{instruct}"
+def _audio_cache_key(text: str, voice: str, speed: float, fmt: str, language: str = "", instruct: str = "") -> str:
+    raw = f"{text}|{voice}|{speed}|{fmt}|{language}|{instruct}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -329,7 +329,7 @@ async def synthesize_speech(request: TTSRequest):
 
     # Fast path: return cached audio without touching the GPU
     cache_key = _audio_cache_key(
-        text, speaker, request.speed, request.response_format, request.instruct or ""
+        text, speaker, request.speed, request.response_format, request.language or "", request.instruct or ""
     )
     cached = _get_audio_cache(cache_key)
     if cached is not None:

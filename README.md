@@ -76,7 +76,7 @@ curl -X POST http://localhost:8101/v1/audio/speech/clone \
 Clear the audio output cache. Returns the number of entries cleared.
 
 ```bash
-rtk curl -X POST http://localhost:8101/cache/clear
+curl -X POST http://localhost:8101/cache/clear
 # {"cleared": 42}
 ```
 
