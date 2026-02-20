@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #4: Add raw PCM streaming endpoint] — 2026-02-20
+### Added
+- `POST /v1/audio/speech/stream/pcm` — raw PCM streaming endpoint; splits text into sentences, streams each as raw int16 PCM bytes with `X-PCM-Sample-Rate`, `X-PCM-Bit-Depth`, `X-PCM-Channels` headers (#4)
+
 ## [Unreleased — Issue #3: Add sentence-chunked SSE streaming] — 2026-02-20
 ### Added
 - Sentence-chunked SSE streaming endpoint `POST /v1/audio/speech/stream` (#3)
