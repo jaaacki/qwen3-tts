@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased — Issue #31: Structured JSON logging] — 2026-02-20
+### Added
+- Structured JSON logging with per-request fields (#31)
+- `LOG_FORMAT` env var: `json` (default) for structured output, `text` for human-readable
+- Per-request `request_id`, latency breakdown (queue_ms, infer_ms, encode_ms, total_ms), voice, language, chars, format
+
 ## [Unreleased — Issue #26: Unix domain socket support] — 2026-02-20
 ### Added
 - **Unix domain socket support** — `UNIX_SOCKET_PATH` env var enables UDS mode, bypassing TCP stack for same-host clients (#26)

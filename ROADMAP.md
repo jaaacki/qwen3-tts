@@ -58,7 +58,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [x] #28 Add eager model preload on startup (`PRELOAD_MODEL` env var)
 - [x] #29 Add `ipc:host` to Docker compose for CUDA IPC
 - [x] #30 Add Prometheus metrics endpoint
-- [ ] #31 Add structured JSON logging with per-request fields
+- [x] #31 Add structured JSON logging with per-request fields
 - [ ] #32 Add request queue depth limit with 503 early rejection
 - [x] #33 Migrate `@app.on_event` to FastAPI lifespan context manager
 - [x] #34 Pin all dependency versions in `requirements.txt`
