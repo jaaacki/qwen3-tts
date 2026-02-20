@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #8: Switch to flash_attention_2] — 2026-02-20
+### Changed
+- Switch attention implementation from `sdpa` to `flash_attention_2` with graceful fallback (#8)
+- Added `flash-attn` to Dockerfile dependencies
+
 ## [Unreleased — Issue #7: Lock GPU clocks to max boost] — 2026-02-20
 ### Changed
 - `docker-entrypoint.sh` — lock GPU clocks to max boost frequency at container startup for consistent inference latency (#7)

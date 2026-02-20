@@ -31,7 +31,8 @@ RUN pip install --no-cache-dir \
     qwen-tts \
     uvloop \
     httptools \
-    orjson
+    orjson \
+    flash-attn
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
