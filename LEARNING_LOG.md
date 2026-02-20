@@ -145,3 +145,16 @@ For the phone call use case, the realistic expectation is that the output cache 
 **Related**: #6
 
 We introduced `docker-entrypoint.sh` as the container's ENTRYPOINT, running GPU tuning commands before exec-ing into uvicorn. GPU settings like `nvidia-smi -pm 1` cannot be baked into the image at build time (no GPU during build). The entrypoint runs at container start when the GPU is available via NVIDIA runtime. The `|| echo` pattern ensures the service starts even without sufficient permissions.
+
+---
+
+## Entry 0009 — flash_attention_2: hardware requirements and fallback
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #8
+
+Switched the model's attention implementation from PyTorch's native SDPA to Flash Attention 2. Flash Attention 2 uses fused CUDA kernels that are 15-20% faster and use less memory by avoiding materialization of the full attention matrix.
+
+Hardware requirement: Flash Attention 2 requires Ampere or newer GPUs (compute capability >= 8.0). This means RTX 3000/4000 series, A100, H100. On older hardware (V100, RTX 2000), the `flash-attn` package either won't install or won't work at runtime.
+
+The fallback pattern is a simple try/except on `import flash_attn`. If the import fails, we fall back to `sdpa` (PyTorch's built-in scaled dot product attention). This means the code works on any GPU — it just runs faster on newer ones. The check happens at model load time, not at import time, so the server starts correctly even without flash-attn installed.

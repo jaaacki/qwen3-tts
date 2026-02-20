@@ -106,14 +106,22 @@ def _load_model_sync():
     model_id = os.getenv("MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
     loaded_model_id = model_id
 
-    print(f"Loading {model_id}...")
+    # Prefer flash_attention_2 on Ampere+ GPUs; fall back to sdpa
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        attn_impl = "sdpa"
+        print("flash_attention_2 not available, falling back to sdpa")
+
+    print(f"Loading {model_id} (attn={attn_impl})...")
     model = Qwen3TTSModel.from_pretrained(
         model_id,
         device_map="cuda" if torch.cuda.is_available() else "cpu",
         dtype=torch.bfloat16,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
-        attn_implementation="sdpa",
+        attn_implementation=attn_impl,
     )
 
     # Warmup inference to trigger CUDA kernel caching
