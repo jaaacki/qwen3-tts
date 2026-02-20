@@ -61,7 +61,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [ ] #31 Add structured JSON logging with per-request fields
 - [ ] #32 Add request queue depth limit with 503 early rejection
 - [x] #33 Migrate `@app.on_event` to FastAPI lifespan context manager
-- [ ] #34 Pin all dependency versions in `requirements.txt`
+- [x] #34 Pin all dependency versions in `requirements.txt`
 - [ ] #35 Convert to multi-stage Docker build
 - [x] #36 Remove dead `VoiceCloneRequest` model
 
