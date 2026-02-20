@@ -120,6 +120,25 @@ None of these changes appear in a typical code review. They are infrastructure-l
 
 ---
 
+## Entry 0008 — Why fasttext over Unicode heuristic for language detection
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #13 — Replace Unicode language heuristic with fasttext detection
+
+The original `detect_language()` function used a character-range heuristic: scan the input text for CJK, Hiragana/Katakana, or Hangul characters, and default to English for anything else. This works for scripts with unique Unicode ranges but fails completely for languages that share the Latin alphabet. French, German, Spanish, Italian, Portuguese, and Russian are all detected as "English" because their characters fall within ASCII or basic Latin ranges.
+
+The Qwen3-TTS model supports all of these languages. A French user sending "Bonjour le monde" gets English prosody applied because the server cannot tell the difference. This is not a theoretical problem — it affects every European language user.
+
+The fix uses `fasttext-langdetect`, which wraps Facebook's fasttext language identification model. It returns ISO 639-1 codes (e.g., "fr", "de", "es") with confidence scores. A mapping dict (`_LANG_MAP`) converts these to the Qwen-expected language names. The implementation is a graceful upgrade: if `fasttext-langdetect` is not installed, the function falls back to the original Unicode heuristic. This means the server works identically without the dependency — it just cannot detect Latin-script languages beyond English.
+
+Key design decisions:
+- **Lazy loading**: The fasttext model loads on first call to `detect_language()`, not at import time. This avoids slowing down startup for a model that might not be needed if every request provides an explicit `language` parameter.
+- **False sentinel**: `_langdetect_model` uses `False` (not `None`) to distinguish "tried to import and failed" from "haven't tried yet". This prevents retrying the import on every request when the package is genuinely missing.
+- **low_memory=False**: The fasttext model is small (~1MB). Loading it fully into memory is faster than the compressed low-memory mode, and the memory cost is negligible compared to the TTS model.
+- **Default to English for unknown ISO codes**: If fasttext returns a language code not in `_LANG_MAP` (e.g., "tl" for Tagalog), the function returns "English" rather than passing through the raw code. This is because Qwen3-TTS has a fixed set of supported languages, and an unsupported language name would cause an inference error.
+
+---
+
 ## Entry 0007 — The caching hierarchy
 **Date**: 2026-02-20
 **Type**: Why this design

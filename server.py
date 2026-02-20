@@ -281,8 +281,23 @@ def resolve_voice(voice: Optional[str]) -> str:
     return VOICE_MAP.get(voice_lower, voice_lower)
 
 
-def detect_language(text: str) -> str:
-    """Simple language detection based on character ranges."""
+_langdetect_model = None
+
+
+def _get_langdetect():
+    """Lazy-load fasttext language detector."""
+    global _langdetect_model
+    if _langdetect_model is None:
+        try:
+            from fasttext_langdetect import detect
+            _langdetect_model = detect
+        except ImportError:
+            _langdetect_model = False
+    return _langdetect_model
+
+
+def _detect_language_unicode(text: str) -> str:
+    """Fallback: language detection based on Unicode character ranges."""
     for ch in text:
         if '\u4e00' <= ch <= '\u9fff':
             return "Chinese"
@@ -291,6 +306,27 @@ def detect_language(text: str) -> str:
         if '\uac00' <= ch <= '\ud7af':
             return "Korean"
     return "English"
+
+
+# Map fasttext ISO codes to Qwen language names
+_LANG_MAP = {
+    "zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean",
+    "fr": "French", "de": "German", "es": "Spanish", "it": "Italian",
+    "pt": "Portuguese", "ru": "Russian",
+}
+
+
+def detect_language(text: str) -> str:
+    """Detect language using fasttext if available, falling back to Unicode heuristic."""
+    detector = _get_langdetect()
+    if detector:
+        try:
+            result = detector(text, low_memory=False)
+            lang = result.get("lang", "en")
+            return _LANG_MAP.get(lang, "English")
+        except Exception:
+            pass
+    return _detect_language_unicode(text)
 
 
 def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: float = -40.0) -> np.ndarray:

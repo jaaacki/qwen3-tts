@@ -32,7 +32,8 @@ RUN pip install --no-cache-dir \
     uvloop \
     httptools \
     orjson \
-    flash-attn
+    flash-attn \
+    fasttext-langdetect
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py

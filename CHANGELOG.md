@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased — Issue #13: Replace Unicode language heuristic with fasttext detection] — 2026-02-20
+### Changed
+- `detect_language()` now uses `fasttext-langdetect` for accurate multi-language detection across 10 languages, falling back to Unicode character-range heuristic when fasttext is unavailable (#13)
+- Added `fasttext-langdetect` to Dockerfile dependencies
+- Added `_get_langdetect()` lazy-loader, `_detect_language_unicode()` fallback, and `_LANG_MAP` ISO-to-Qwen mapping
+
 ## [Unreleased — Issue #10: Multi-length GPU warmup] — 2026-02-20
 ### Changed
 - GPU warmup now runs 3 synthesis calls at different text lengths (5, 30, 90 chars) to pre-cache more CUDA kernel paths (#10)
