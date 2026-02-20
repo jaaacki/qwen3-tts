@@ -336,3 +336,12 @@ The LD_PRELOAD approach is the least invasive: the application code is unchanged
 **Related**: Issue #22
 
 The original implementation used `os.system(f"taskset -p -c {cores} {pid}")` which has two problems. First, it is a command injection vector — the `INFERENCE_CPU_CORES` env var is interpolated directly into a shell command. Setting it to `0-7; rm -rf /` would execute the destructive command. Second, `taskset -p` changes the affinity for the entire process (all threads), including the uvicorn event loop, which defeats the purpose of pinning only the inference thread. The fix uses `os.sched_setaffinity(0, cores)` which: (a) takes a set of integers, eliminating shell injection, and (b) is a direct syscall wrapper with no shell involved. Note that `os.sched_setaffinity(0, ...)` still sets affinity for the calling process (PID 0 = current), not just the calling thread. True per-thread affinity would require `pthread_setaffinity_np` via ctypes, which is too fragile. The process-level approach is acceptable because the inference thread pool has only one thread and the event loop is lightweight.
+
+---
+
+## Entry 0016 — Transparent huge pages: madvise over always
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #23
+
+THP `madvise` mode is chosen over `always` because `always` can cause latency spikes from compaction pauses and memory bloat in allocations that do not benefit from large pages (e.g., small Python objects). With `madvise`, only memory regions explicitly marked with `madvise(MADV_HUGEPAGE)` — or large anonymous mappings like PyTorch model weights — get backed by 2MB pages. The model weights (~2.4GB) consist of thousands of 4KB pages; mapping them as 2MB pages reduces TLB entries from ~600K to ~1200, significantly reducing TLB miss overhead during inference. The `defrag: defer+madvise` setting tells the kernel to defer compaction to a background thread rather than stalling the allocating process. All THP writes in the entrypoint are non-fatal (`|| true`) because the sysfs paths may be read-only in containers without `--privileged` or SYS_ADMIN capability.
