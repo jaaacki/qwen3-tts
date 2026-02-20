@@ -197,6 +197,21 @@ The fallback pattern is a simple try/except on `import flash_attn`. If the impor
 
 ---
 
+## Entry 0011 — Voice prompt cache: hash bytes not filenames
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #15 — Add voice prompt cache for /clone endpoint
+
+The voice cloning endpoint processes reference audio on every request: read bytes, decode with soundfile, convert stereo to mono. When the same reference audio is reused across requests (the common case — a user picks a voice and uses it repeatedly), this processing is redundant.
+
+The cache key is a SHA-256 hash of the raw audio bytes, not the filename. Filenames are unreliable — the same file can be uploaded with different names, and different files can share a name. Content hashing guarantees that identical audio produces the same key regardless of how it was uploaded.
+
+The cache uses `collections.OrderedDict` as an LRU. On hit, `move_to_end()` promotes the entry; on insert, `popitem(last=False)` evicts the oldest entry when capacity exceeds `VOICE_CACHE_MAX`. This is simpler than `functools.lru_cache` because the cache key is a hash string (not the raw bytes), and we need manual control over cache size via an env var that can be set to 0 to disable caching entirely.
+
+The health endpoint exposes `voice_cache_size`, `voice_cache_max`, and `voice_cache_hits` so operators can monitor hit rates and tune capacity.
+
+---
+
 ## Entry 0010 — torch.compile: the first-inference cost
 **Date**: 2026-02-20
 **Type**: What just happened

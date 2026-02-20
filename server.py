@@ -10,7 +10,9 @@ import gc
 import asyncio
 import time
 import re
+import hashlib
 import numpy as np
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
 
@@ -58,6 +60,11 @@ TEXT_NORMALIZE = os.getenv("TEXT_NORMALIZE", "true").lower() in ("true", "1", "y
 
 # Track last request time
 _last_used = 0.0
+
+# Voice prompt cache — caches processed reference audio by content hash
+VOICE_CACHE_MAX = int(os.getenv("VOICE_CACHE_MAX", "32"))
+_voice_cache: OrderedDict[str, tuple[np.ndarray, int]] = OrderedDict()
+_voice_cache_hits = 0
 
 # Map OpenAI-style voice names to Qwen3-TTS speakers
 VOICE_MAP = {
@@ -242,6 +249,9 @@ async def health():
         "model_id": loaded_model_id,
         "cuda": torch.cuda.is_available(),
         "voices": list(VOICE_MAP.keys()),
+        "voice_cache_size": len(_voice_cache),
+        "voice_cache_max": VOICE_CACHE_MAX,
+        "voice_cache_hits": _voice_cache_hits,
         **gpu_info,
     }
 
@@ -406,6 +416,32 @@ def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     return wavs, sr
 
 
+def _get_cached_ref_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
+    """Get processed reference audio from cache or process and cache it."""
+    global _voice_cache_hits
+    if VOICE_CACHE_MAX <= 0:
+        ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
+        if len(ref_audio_data.shape) > 1:
+            ref_audio_data = ref_audio_data.mean(axis=1)
+        return ref_audio_data, ref_sr
+
+    cache_key = hashlib.sha256(audio_bytes).hexdigest()
+    if cache_key in _voice_cache:
+        _voice_cache_hits += 1
+        _voice_cache.move_to_end(cache_key)
+        return _voice_cache[cache_key]
+
+    ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
+    if len(ref_audio_data.shape) > 1:
+        ref_audio_data = ref_audio_data.mean(axis=1)
+
+    _voice_cache[cache_key] = (ref_audio_data, ref_sr)
+    while len(_voice_cache) > VOICE_CACHE_MAX:
+        _voice_cache.popitem(last=False)
+
+    return ref_audio_data, ref_sr
+
+
 def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
     """Run voice clone inference. No per-request GC — let CUDA reuse cached allocations."""
     with torch.inference_mode():
@@ -487,11 +523,9 @@ async def clone_voice(
         raise HTTPException(status_code=400, detail="Input text is required")
 
     try:
-        # Read reference audio
+        # Read and cache reference audio
         audio_bytes = await file.read()
-        ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
-        if len(ref_audio_data.shape) > 1:
-            ref_audio_data = ref_audio_data.mean(axis=1)
+        ref_audio_data, ref_sr = _get_cached_ref_audio(audio_bytes)
 
         language = language or detect_language(input)
         gen_kwargs = {"max_new_tokens": 2048}
