@@ -16,6 +16,7 @@ services:
       - VAD_TRIM=true
       - TEXT_NORMALIZE=true
       - VOICE_CACHE_MAX=32
+      - PRELOAD_MODEL=false     # true = load model at startup instead of first request
     volumes:
       - ./models:/root/.cache/huggingface
     shm_size: "1g"
@@ -31,4 +32,4 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 60s  # Increase if PRELOAD_MODEL=true (model load takes 10-15s)

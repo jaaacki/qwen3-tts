@@ -39,10 +39,17 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True   # 3x faster matmul on Ampere+ GPUs
     torch.backends.cudnn.allow_tf32 = True           # enable TF32 for cuDNN ops
 
+# Eager model preload on startup (default: false)
+PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "false").lower() in ("true", "1")
+
 @asynccontextmanager
 async def lifespan(app):
     # Startup
     asyncio.create_task(_idle_watchdog())
+    if PRELOAD_MODEL:
+        print("PRELOAD_MODEL=true: loading model at startup")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_infer_executor, _load_model_sync)
     print("Server started")
     yield
     # Shutdown
