@@ -28,6 +28,31 @@ try:
 except ImportError:
     _pyrubberband = None
 
+logger = logging.getLogger("qwen3-tts")
+
+# Prometheus metrics (optional — enabled by default)
+PROMETHEUS_ENABLED = os.getenv("PROMETHEUS_ENABLED", "true").lower() in ("true", "1")
+
+if PROMETHEUS_ENABLED:
+    try:
+        from prometheus_client import Counter, Histogram, Gauge
+        from prometheus_fastapi_instrumentator import Instrumentator
+
+        tts_requests_total = Counter(
+            "tts_requests_total", "Total TTS requests", ["voice", "format"]
+        )
+        tts_inference_duration = Histogram(
+            "tts_inference_duration_seconds", "Inference duration in seconds"
+        )
+        tts_model_loaded = Gauge(
+            "tts_model_loaded", "Whether model is currently loaded (1=yes, 0=no)"
+        )
+        _prometheus_available = True
+    except ImportError:
+        _prometheus_available = False
+else:
+    _prometheus_available = False
+
 try:
     from pydub import AudioSegment as _PydubAudioSegment
 except ImportError:
@@ -45,6 +70,8 @@ PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "false").lower() in ("true", "1")
 @asynccontextmanager
 async def lifespan(app):
     # Startup
+    if _prometheus_available:
+        Instrumentator().instrument(app).expose(app)
     asyncio.create_task(_idle_watchdog())
     if PRELOAD_MODEL:
         print("PRELOAD_MODEL=true: loading model at startup")
@@ -230,6 +257,8 @@ def _load_model_sync():
             print(f"  CUDA pool pre-warm failed: {e}")
 
     _last_used = time.time()
+    if _prometheus_available:
+        tts_model_loaded.set(1)
     print(f"Model loaded: {model_id}")
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -247,6 +276,8 @@ def _unload_model_sync():
     print("Unloading model (idle timeout)...")
     del model
     model = None
+    if _prometheus_available:
+        tts_model_loaded.set(0)
     _release_gpu_full()
 
     if torch.cuda.is_available():
@@ -602,6 +633,10 @@ async def synthesize_speech(request: TTSRequest):
         )
 
         _set_audio_cache(cache_key, audio_bytes, content_type)
+
+        if _prometheus_available:
+            tts_requests_total.labels(voice=speaker, format=request.response_format).inc()
+            tts_inference_duration.observe(t_infer_end - t_infer_start)
 
         return Response(
             content=audio_bytes,
