@@ -327,3 +327,12 @@ Python's default memory allocator (glibc ptmalloc2) uses per-thread arenas to re
 jemalloc uses a different strategy: size-class segregated regions with background thread compaction. The `dirty_decay_ms=1000` setting tells jemalloc to return freed pages to the OS within 1 second. `muzzy_decay_ms=0` tells it to immediately decommit pages rather than keeping them as "muzzy" (mapped but uncommitted). `background_thread:true` enables a dedicated thread that handles the decay without blocking application threads.
 
 The LD_PRELOAD approach is the least invasive: the application code is unchanged, the allocator swap happens at process startup, and removing the env var reverts to ptmalloc2. No server.py changes needed.
+
+---
+
+## Entry 0015 — CPU affinity: sched_setaffinity over taskset
+**Date**: 2026-02-20
+**Type**: What could go wrong
+**Related**: Issue #22
+
+The original implementation used `os.system(f"taskset -p -c {cores} {pid}")` which has two problems. First, it is a command injection vector — the `INFERENCE_CPU_CORES` env var is interpolated directly into a shell command. Setting it to `0-7; rm -rf /` would execute the destructive command. Second, `taskset -p` changes the affinity for the entire process (all threads), including the uvicorn event loop, which defeats the purpose of pinning only the inference thread. The fix uses `os.sched_setaffinity(0, cores)` which: (a) takes a set of integers, eliminating shell injection, and (b) is a direct syscall wrapper with no shell involved. Note that `os.sched_setaffinity(0, ...)` still sets affinity for the calling process (PID 0 = current), not just the calling thread. True per-thread affinity would require `pthread_setaffinity_np` via ctypes, which is too fragile. The process-level approach is acceptable because the inference thread pool has only one thread and the event loop is lightweight.

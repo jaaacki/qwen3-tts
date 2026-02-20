@@ -72,6 +72,7 @@ async def lifespan(app):
     # Startup
     if _prometheus_available:
         Instrumentator().instrument(app).expose(app)
+    _set_cpu_affinity()
     asyncio.create_task(_idle_watchdog())
     if PRELOAD_MODEL:
         print("PRELOAD_MODEL=true: loading model at startup")
@@ -312,6 +313,36 @@ async def _idle_watchdog():
                 if model is not None and time.time() - _last_used > IDLE_TIMEOUT:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(_infer_executor, _unload_model_sync)
+
+
+def _parse_cpu_cores(spec: str) -> set[int]:
+    """Parse CPU core spec like '0-3,6,8-11' into a set of ints."""
+    cores = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cores.update(range(int(lo), int(hi) + 1))
+        else:
+            cores.add(int(part))
+    return cores
+
+
+def _set_cpu_affinity():
+    """Pin process to GPU-adjacent CPU cores for better cache locality.
+
+    Uses os.sched_setaffinity() instead of taskset to avoid command injection
+    and to correctly set affinity for the calling process.
+    """
+    affinity_cores = os.getenv("INFERENCE_CPU_CORES", "")
+    if not affinity_cores:
+        return
+    try:
+        cores = _parse_cpu_cores(affinity_cores)
+        os.sched_setaffinity(0, cores)
+        print(f"CPU affinity set: cores {sorted(cores)}")
+    except Exception as e:
+        print(f"Could not set CPU affinity: {e}")
 
 
 @app.get("/health")
