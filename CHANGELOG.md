@@ -1,5 +1,119 @@
 # Changelog
 
+## [Unreleased — Issue #32: Request queue depth limit] — 2026-02-20
+### Added
+- Request queue depth limit with 503 early rejection (#32)
+- `MAX_QUEUE_DEPTH` env var (default 5, 0 = unlimited)
+- `Retry-After: 5` header on 503 responses
+- `queue_depth` and `max_queue_depth` fields in `/health` response
+
+## [Unreleased — Issue #31: Structured JSON logging] — 2026-02-20
+### Added
+- Structured JSON logging with per-request fields (#31)
+- `LOG_FORMAT` env var: `json` (default) for structured output, `text` for human-readable
+- Per-request `request_id`, latency breakdown (queue_ms, infer_ms, encode_ms, total_ms), voice, language, chars, format
+
+## [Unreleased — Issue #26: Unix domain socket support] — 2026-02-20
+### Added
+- **Unix domain socket support** — `UNIX_SOCKET_PATH` env var enables UDS mode, bypassing TCP stack for same-host clients (#26)
+- Note: UDS mode disables TCP binding — cannot use both simultaneously. Use `curl --unix-socket` syntax for UDS.
+- Note: CMD logic should be consolidated into `docker-entrypoint.sh` from #23 during milestone merge
+
+## [Unreleased — Issue #25: HTTP/2 support] — 2026-02-20
+### Added
+- **HTTP/2 support** — `h2>=4.0.0` package installed; requires TLS certificates (h2c cleartext not widely supported) (#25)
+- **Conditional TLS** — `SSL_KEYFILE` and `SSL_CERTFILE` env vars enable HTTPS + HTTP/2; empty by default (plain HTTP/1.1) (#25)
+- `docker-entrypoint.sh` appends `--ssl-keyfile`/`--ssl-certfile` to uvicorn args only when env vars are set (#25)
+
+## [Unreleased — Issue #24: WebSocket streaming endpoint] — 2026-02-20
+### Added
+- **WebSocket streaming endpoint** — `WS /v1/audio/speech/ws` accepts JSON, streams binary PCM per sentence chunk, sends `{"event": "done"}` on completion (#24)
+- **Abbreviation-aware sentence splitting** — regex handles Dr., U.S.A., CJK full-width punctuation (#24)
+- **`websockets`** added to Dockerfile — required by Starlette for WebSocket protocol (#24)
+
+### Fixed
+- Add `np.clip(-1.0, 1.0)` before int16 PCM conversion to prevent audio distortion from out-of-range values (#24)
+
+## [Unreleased — Issue #20: Async audio encode pipeline] — 2026-02-20
+### Added
+- **Async audio encode pipeline** — dedicated `_encode_executor` (2 CPU threads) for audio encoding, freeing the event loop during format conversion; applied to both `/speech` and `/clone` endpoints (#20)
+- **`_split_sentences` helper** — regex-based sentence splitter for future streaming pipeline overlap (#20)
+- **`_encode_audio_async`** — async wrapper for `convert_audio_format` that runs in CPU thread pool (#20)
+- Note: true pipeline overlap (encode N while synthesizing N+1) requires streaming endpoints from Phase 1 (#3/#4); this PR provides the infrastructure
+
+## [Unreleased — Issue #19: GPU-accelerated audio with torchaudio] — 2026-02-20
+### Added
+- **torchaudio integration** — WAV encoding via `torchaudio.save()` and GPU-accelerated speed adjustment via `torchaudio.functional.resample()` with CUDA tensor; falls back to soundfile/scipy on CPU-only hosts (#19)
+- Note: speed adjustment via resample changes both duration and pitch (same as scipy); pitch-preserving speed is covered by issue #14 (pyrubberband)
+
+## [Unreleased — Issue #18: Opus codec support] — 2026-02-20
+### Added
+- **Opus codec support** — `response_format=opus` via pydub/ffmpeg libopus at 32kbps; 2.5ms encode latency vs ~50ms for MP3 (#18)
+- **`libopus-dev`** added to Dockerfile for Opus encoding support (use `libopus0` in multi-stage builds) (#18)
+
+## [Unreleased — Issue #23: Transparent huge pages] — 2026-02-20
+### Added
+- **Transparent huge pages** — `docker-entrypoint.sh` attempts to enable THP madvise mode at container startup; reduces TLB pressure for model weights (#23)
+- **`docker-entrypoint.sh`** — shell entrypoint for system tuning before uvicorn starts; consolidation point for #25 (HTTP/2) and #26 (UDS) startup logic (#23)
+### Changed
+- Dockerfile now uses ENTRYPOINT with shell script instead of CMD array (#23)
+
+## [Unreleased — Issue #22: CPU affinity for inference thread] — 2026-02-20
+### Added
+- **CPU affinity for inference** — `INFERENCE_CPU_CORES` env var pins process to GPU-adjacent cores via `os.sched_setaffinity()` (#22)
+
+### Security
+- Uses `os.sched_setaffinity()` instead of `os.system(taskset)` to prevent command injection via env var
+
+## [Unreleased — Issue #21: jemalloc memory allocator] — 2026-02-20
+### Added
+- **jemalloc memory allocator** — `LD_PRELOAD` jemalloc as Dockerfile ENV (also works with plain `docker run`); reduces memory fragmentation in long-running processes (#21)
+- **`MALLOC_CONF`** — jemalloc tuning: background thread, 1s dirty decay, immediate muzzy decay (#21)
+- Note: LD_PRELOAD path assumes x86_64 Linux; adjust for aarch64 deployments
+
+## [Unreleased — Issue #29: Add ipc:host for CUDA IPC] — 2026-02-20
+### Changed
+- Added `ipc: host` to Docker compose for CUDA IPC namespace sharing (#29)
+
+## [Unreleased — Issue #35: Multi-stage Docker build] — 2026-02-20
+### Changed
+- Dockerfile converted to multi-stage build — builder stage installs deps, runtime stage ships only packages and runtime libs (no git, no build tools) (#35)
+
+## [Unreleased — Issue #34: Pin all dependency versions] — 2026-02-20
+### Added
+- `requirements.txt` with pinned dependency versions for reproducible builds (#34)
+
+## [Unreleased — Issue #30: Prometheus metrics endpoint] — 2026-02-20
+### Added
+- Prometheus metrics endpoint (`GET /metrics`) via `prometheus-fastapi-instrumentator` (#30)
+- Custom metrics: `tts_requests_total` (counter by voice/format), `tts_inference_duration_seconds` (histogram), `tts_model_loaded` (gauge)
+- `PROMETHEUS_ENABLED` env var (default `true`) to enable/disable metrics
+
+## [Unreleased — Issue #28: Preload model at startup] — 2026-02-20
+### Added
+- `PRELOAD_MODEL` env var — set to `true` to load model at startup instead of first request (#28)
+- Healthcheck `start_period` increased to 60s to accommodate preload
+
+## [Unreleased — Issue #27: Always-on mode] — 2026-02-20
+### Added
+- Always-on mode documentation — `IDLE_TIMEOUT=0` disables idle unload for dedicated GPU servers (#27)
+
+## [Unreleased — Issue #33: Migrate @app.on_event to FastAPI lifespan] — 2026-02-20
+### Changed
+- Migrated from deprecated `@app.on_event("startup")` to FastAPI lifespan context manager (#33)
+- Server now performs graceful model unload on shutdown via lifespan teardown
+
+## [Unreleased — Issue #17: Audio output LRU cache] — 2026-02-20
+### Added
+- Audio output LRU cache — in-memory cache keyed by SHA-256 of (text, voice, speed, format, language, instruct); cache hit returns bytes in ~1ms, skipping GPU entirely (#17)
+- `POST /cache/clear` endpoint — clears audio cache, returns count of evicted entries (#17)
+- `AUDIO_CACHE_MAX` env var — max cache entries (default 256, set to 0 to disable) (#17)
+- Cache info in `/health` — `audio_cache_size` and `audio_cache_max` fields (#17)
+- Voice clone endpoint is intentionally not cached — clone inputs (ref audio) are unlikely to repeat
+
+## [Unreleased — Issue #36: remove dead VoiceCloneRequest] — 2026-02-20
+### Changed
+- Remove unused `VoiceCloneRequest` Pydantic model from `server.py` — the `/clone` endpoint uses `Form()` parameters directly; model was dead code (#36)
 ## [Unreleased — Issue #16: Pre-allocate GPU memory pool] — 2026-02-20
 ### Added
 - GPU memory pool pre-warming after model warmup — allocates and frees a 128 MB dummy tensor to pre-reserve a contiguous CUDA memory block, reducing first-request allocation jitter (#16)

@@ -44,26 +44,26 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 
 Caching and codec work unlocks efficient streaming. System-level tuning reduces jitter. Protocol upgrades widen the deployment surface. Lifecycle and observability close the loop for production operations. Housekeeping at the end cleans up tech debt while the server is stable.
 
-- [ ] #17 Add full audio output LRU cache (text+voice to cached bytes)
-- [ ] #18 Add Opus codec support for streaming
-- [ ] #19 Add GPU-accelerated audio processing with torchaudio
-- [ ] #20 Add async audio encode pipeline (overlap encode N with synthesis N+1)
-- [ ] #21 Add jemalloc memory allocator via `LD_PRELOAD`
-- [ ] #22 Set CPU affinity for inference thread to GPU-adjacent cores
-- [ ] #23 Enable transparent huge pages for model weights
-- [ ] #24 Add WebSocket streaming endpoint
-- [ ] #25 Enable HTTP/2 support
-- [ ] #26 Add Unix domain socket support for same-host clients
-- [ ] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)
-- [ ] #28 Add eager model preload on startup (`PRELOAD_MODEL` env var)
-- [ ] #29 Add `ipc:host` to Docker compose for CUDA IPC
-- [ ] #30 Add Prometheus metrics endpoint
-- [ ] #31 Add structured JSON logging with per-request fields
-- [ ] #32 Add request queue depth limit with 503 early rejection
-- [ ] #33 Migrate `@app.on_event` to FastAPI lifespan context manager
-- [ ] #34 Pin all dependency versions in `requirements.txt`
-- [ ] #35 Convert to multi-stage Docker build
-- [ ] #36 Remove dead `VoiceCloneRequest` model
+- [x] #17 Add full audio output LRU cache (text+voice to cached bytes)
+- [x] #18 Add Opus codec support for streaming
+- [x] #19 Add GPU-accelerated audio processing with torchaudio
+- [x] #20 Add async audio encode pipeline (overlap encode N with synthesis N+1)
+- [x] #21 Add jemalloc memory allocator via `LD_PRELOAD`
+- [x] #22 Set CPU affinity for inference thread to GPU-adjacent cores
+- [x] #23 Enable transparent huge pages for model weights
+- [x] #24 Add WebSocket streaming endpoint
+- [x] #25 Enable HTTP/2 support
+- [x] #26 Add Unix domain socket support for same-host clients
+- [x] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)
+- [x] #28 Add eager model preload on startup (`PRELOAD_MODEL` env var)
+- [x] #29 Add `ipc:host` to Docker compose for CUDA IPC
+- [x] #30 Add Prometheus metrics endpoint
+- [x] #31 Add structured JSON logging with per-request fields
+- [x] #32 Add request queue depth limit with 503 early rejection
+- [x] #33 Migrate `@app.on_event` to FastAPI lifespan context manager
+- [x] #34 Pin all dependency versions in `requirements.txt`
+- [x] #35 Convert to multi-stage Docker build
+- [x] #36 Remove dead `VoiceCloneRequest` model
 
 ---
 

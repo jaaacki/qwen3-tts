@@ -188,7 +188,24 @@ For the phone call use case, the realistic expectation is that the output cache 
 
 ---
 
-## Entry 0008 — GPU persistence mode and the entrypoint pattern
+## Entry 0008 — Audio cache: key design and LRU eviction
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #17
+
+The audio output cache is an OrderedDict keyed by SHA-256 of `text|voice|speed|format|instruct`. The key includes every parameter that affects the output — if any parameter changes, the cache key changes, and a new synthesis runs. The pipe delimiter prevents ambiguity between parameters (e.g., "hello|vivian" vs "hello|" + "vivian").
+
+The cache stores the final encoded bytes and content type, not the raw audio array. This means a cache hit returns the exact HTTP response body — no format conversion, no speed adjustment, no GPU work at all. The cost of a cache hit is one SHA-256 hash (~1 microsecond) plus one OrderedDict lookup (~1 microsecond).
+
+The cache check happens before `_ensure_model_loaded()`. This is deliberate: if every request for the next hour hits the cache, the model never loads, and VRAM stays free. The idle watchdog continues running, but since the model was never loaded, it has nothing to unload. This makes the cache especially valuable in shared GPU environments where VRAM is contended.
+
+LRU eviction uses `OrderedDict.move_to_end()` on hit and `popitem(last=False)` when full. This is O(1) for both operations. The default capacity of 256 entries is sized for a typical IVR deployment where 20-50 unique system phrases repeat across thousands of calls. At roughly 100KB per WAV entry (1 second of 24kHz 16-bit audio), 256 entries consume about 25MB of RAM — negligible compared to the 2.4GB model.
+
+Setting `AUDIO_CACHE_MAX=0` disables all cache operations: `_get_audio_cache` returns None immediately, `_set_audio_cache` is a no-op. This is the safe default for testing or debugging where deterministic behavior is needed.
+
+---
+
+## Entry 0009 — GPU persistence mode and the entrypoint pattern
 **Date**: 2026-02-20
 **Type**: What just happened
 **Related**: #6
@@ -261,3 +278,124 @@ The safety argument for enabling TF32 on this model is straightforward: the mode
 Two separate flags are needed: `torch.backends.cuda.matmul.allow_tf32` controls general matrix multiplication, and `torch.backends.cudnn.allow_tf32` controls cuDNN convolution operations. Both default to False in PyTorch. On pre-Ampere GPUs these flags are no-ops — the hardware simply ignores them.
 
 The test strategy uses mock-based reimport rather than `if torch.cuda.is_available()` guards. This ensures tests actually assert on non-CUDA CI machines instead of silently passing. The pattern: reset flags to False, mock `cuda.is_available` to return True, reimport the server module, verify flags became True.
+
+---
+
+## Entry 0013 — Why lifespan over @app.on_event
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #33
+
+FastAPI deprecated `@app.on_event("startup")` and `@app.on_event("shutdown")` in version 0.93.0. The replacement is the lifespan context manager pattern: `@asynccontextmanager async def lifespan(app)`. The yield point separates startup from shutdown — everything before yield runs at startup, everything after runs at shutdown.
+
+The practical advantage is not just suppressing deprecation warnings. The old pattern had separate startup and shutdown functions with no shared scope. If startup allocated a resource (like a background task handle), the shutdown function needed that handle stored in a global or on the app object. With lifespan, variables from the startup section are naturally in scope during teardown:
+
+```python
+@asynccontextmanager
+async def lifespan(app):
+    watchdog_task = asyncio.create_task(_idle_watchdog())  # startup
+    yield
+    watchdog_task.cancel()  # shutdown — same scope, no global needed
+```
+
+For our server, the immediate benefit is that model unload now runs on graceful shutdown. Previously, if the container was stopped with SIGTERM, the model was not explicitly unloaded — the process just died and the GPU driver reclaimed VRAM. With the lifespan teardown, we run `_unload_model_sync()` which calls `gc.collect()` and `torch.cuda.empty_cache()` before exit. This ensures clean VRAM release in shared GPU environments where another container might be waiting for memory.
+
+---
+
+## Entry 0009 — Prometheus instrumentator vs manual metrics
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #30
+
+We use two layers of metrics: automatic HTTP instrumentation via `prometheus-fastapi-instrumentator` and custom TTS-specific metrics via `prometheus-client` directly.
+
+The instrumentator auto-adds request count, latency histograms, and response size metrics for every endpoint. This covers the "web server" dimension -- you can alert on 5xx rate, p99 latency, and throughput without writing any code.
+
+The custom metrics cover the "TTS engine" dimension that the instrumentator cannot see: `tts_inference_duration_seconds` measures only the model inference time (excluding queue wait and audio encoding), `tts_requests_total` breaks down by voice and format, and `tts_model_loaded` tracks whether the model is in VRAM. These are the metrics you actually need for capacity planning -- if inference duration is climbing, the GPU is under pressure; if model_loaded flaps between 0 and 1, the idle timeout is too aggressive.
+
+The implementation is gated behind `PROMETHEUS_ENABLED` and falls back gracefully if the packages are not installed. This keeps Prometheus as a soft dependency -- the server works without it.
+
+---
+
+## Entry 0014 — jemalloc: why the default allocator causes RSS bloat
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #21
+
+Python's default memory allocator (glibc ptmalloc2) uses per-thread arenas to reduce lock contention. Each arena independently allocates and frees memory from the OS. The problem: when a thread frees a block, the arena may not return the underlying pages to the OS if adjacent blocks are still allocated. Over hours of operation with many small allocations (tokenizer strings, audio buffers, numpy intermediates), the RSS grows 2-3x beyond actual usage.
+
+jemalloc uses a different strategy: size-class segregated regions with background thread compaction. The `dirty_decay_ms=1000` setting tells jemalloc to return freed pages to the OS within 1 second. `muzzy_decay_ms=0` tells it to immediately decommit pages rather than keeping them as "muzzy" (mapped but uncommitted). `background_thread:true` enables a dedicated thread that handles the decay without blocking application threads.
+
+The LD_PRELOAD approach is the least invasive: the application code is unchanged, the allocator swap happens at process startup, and removing the env var reverts to ptmalloc2. No server.py changes needed.
+
+---
+
+## Entry 0015 — CPU affinity: sched_setaffinity over taskset
+**Date**: 2026-02-20
+**Type**: What could go wrong
+**Related**: Issue #22
+
+The original implementation used `os.system(f"taskset -p -c {cores} {pid}")` which has two problems. First, it is a command injection vector — the `INFERENCE_CPU_CORES` env var is interpolated directly into a shell command. Setting it to `0-7; rm -rf /` would execute the destructive command. Second, `taskset -p` changes the affinity for the entire process (all threads), including the uvicorn event loop, which defeats the purpose of pinning only the inference thread. The fix uses `os.sched_setaffinity(0, cores)` which: (a) takes a set of integers, eliminating shell injection, and (b) is a direct syscall wrapper with no shell involved. Note that `os.sched_setaffinity(0, ...)` still sets affinity for the calling process (PID 0 = current), not just the calling thread. True per-thread affinity would require `pthread_setaffinity_np` via ctypes, which is too fragile. The process-level approach is acceptable because the inference thread pool has only one thread and the event loop is lightweight.
+
+---
+
+## Entry 0016 — Transparent huge pages: madvise over always
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #23
+
+THP `madvise` mode is chosen over `always` because `always` can cause latency spikes from compaction pauses and memory bloat in allocations that do not benefit from large pages (e.g., small Python objects). With `madvise`, only memory regions explicitly marked with `madvise(MADV_HUGEPAGE)` — or large anonymous mappings like PyTorch model weights — get backed by 2MB pages. The model weights (~2.4GB) consist of thousands of 4KB pages; mapping them as 2MB pages reduces TLB entries from ~600K to ~1200, significantly reducing TLB miss overhead during inference. The `defrag: defer+madvise` setting tells the kernel to defer compaction to a background thread rather than stalling the allocating process. All THP writes in the entrypoint are non-fatal (`|| true`) because the sysfs paths may be read-only in containers without `--privileged` or SYS_ADMIN capability.
+
+---
+
+## Entry 0017 — Opus codec: bitrate choice for speech
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #18
+
+Opus at 32kbps is near-transparent quality for mono speech. The codec was designed specifically for speech and handles it well at low bitrates. We chose 32kbps over the original 64kbps spec because: (1) doubling the bitrate provides no perceptible quality improvement for single-speaker TTS audio, (2) lower bitrate halves bandwidth for streaming use cases, and (3) Opus at 32kbps still comfortably exceeds the quality of telephone-grade audio (8kbps G.711). The encoding path goes through a WAV intermediate via pydub (same as the existing MP3 path), which adds ~20ms overhead. A future optimization could pipe raw PCM directly to ffmpeg's Opus encoder, bypassing the WAV round-trip. The Dockerfile installs `libopus-dev` for build-time compilation support; multi-stage builds should use `libopus0` in the runtime stage to avoid shipping unnecessary header files.
+
+---
+
+## Entry 0018 — torchaudio: GPU-accelerated audio processing
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: Issue #19
+
+The torchaudio integration replaces soundfile for WAV encoding and scipy for speed-adjustment resampling. The key insight is that torchaudio's `resample()` operates on CUDA tensors, keeping the audio data on GPU and avoiding a CPU round-trip. On Ampere+ GPUs, the polyphase resampling kernel runs significantly faster than scipy's CPU-bound FFT-based resample. The implementation moves the audio tensor to CUDA before resampling and back to CPU only for the final encoding step. On CPU-only hosts, torchaudio still runs on CPU (faster than scipy due to optimized C++ kernels) with a graceful fallback to scipy if torchaudio is not installed. Important caveat: `torchaudio.functional.resample()` changes sample rate, which changes both duration AND pitch — identical behavior to scipy. It is NOT pitch-preserving. Issue #14 (pyrubberband) is the pitch-preserving solution. The base PyTorch Docker image may already include torchaudio; the Dockerfile pip install is a safeguard but could cause version mismatches — verify inside the container.
+
+---
+
+## Entry 0019 — Async encode pipeline: infrastructure before overlap
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #20
+
+The async encode pipeline moves audio format conversion (WAV/MP3/FLAC/OGG encoding) from the main event loop thread into a dedicated 2-thread CPU executor. This is infrastructure, not the full optimization. The full optimization is: while encoding sentence N on a CPU thread, start synthesizing sentence N+1 on the GPU. That requires the streaming endpoints from Phase 1 (#3/#4). Without streaming, there is only one inference per request, so encoding overlap has limited benefit for single-sentence requests. For multi-sentence streaming, the pipeline overlap could reduce total latency by 20-40ms per sentence (the encoding time that would otherwise gate the next synthesis). The `_split_sentences` helper is included here because it is the natural boundary for chunking. The `import re` was moved to the top of the file per Python convention — inline imports are confusing.
+
+---
+
+## Entry 0020 — WebSocket streaming: sentence chunking and PCM safety
+**Date**: 2026-02-20
+**Type**: What could go wrong
+**Related**: Issue #24
+
+Two bugs were caught in review. First, the sentence-splitting regex `(?<=[.!?])\s+` incorrectly splits on abbreviations like "Dr. Smith" or "U.S.A.". The fix uses abbreviation-aware lookbehinds: `(?<!\w\.\w.)(?<![A-Z][a-z]\.)` and adds CJK full-width punctuation (U+3002, U+FF01, U+FF1F) so Chinese/Japanese text with `。！？` gets chunked correctly. Second, float audio values outside [-1.0, 1.0] cause int16 wraparound distortion when multiplied by 32767. The model can occasionally produce values slightly above 1.0. Adding `np.clip(audio_data, -1.0, 1.0)` before conversion prevents this. The existing PCM streaming endpoint already had this clip; the WebSocket endpoint missed it.
+
+---
+
+## Entry 0021 — HTTP/2: TLS requirement and practical benefits
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #25
+
+HTTP/2 requires TLS in practice. While the spec defines h2c (cleartext HTTP/2), browsers and most HTTP clients do not support it. The `h2` package provides the protocol implementation, but uvicorn only negotiates HTTP/2 via ALPN during the TLS handshake. Without TLS certificates, the server runs plain HTTP/1.1 — the `h2` package sits unused but harmless. The practical benefits of HTTP/2 for a TTS server are modest: header compression saves a few bytes per request, and multiplexing allows concurrent requests on one connection. For most TTS workloads (single request, wait for audio, play), HTTP/1.1 is sufficient. The value comes in multi-tenant deployments where many clients connect through a load balancer — fewer TCP connections and faster header processing. The docker-entrypoint.sh appends conditional TLS flags when SSL env vars are set, keeping the ENTRYPOINT pattern from #23 intact.
+
+---
+
+## Entry 0022 — Unix domain sockets: when to bypass TCP
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #26
+
+UDS removes the TCP/IP stack overhead for same-host communication: no three-way handshake, no Nagle buffering, no checksumming. For a TTS server called by a local proxy or application, this saves 1-2ms per request (meaningful when the goal is sub-100ms time-to-first-byte for cached responses). The tradeoff: UDS and TCP are mutually exclusive — when `UNIX_SOCKET_PATH` is set, uvicorn binds only to the socket file, not to a TCP port. This means external clients cannot reach the service over the network. The intended deployment is behind a reverse proxy (nginx, caddy) that listens on TCP and forwards to the UDS. The `docker-entrypoint.sh` checks `UNIX_SOCKET_PATH` first and execs uvicorn with `--uds`, consolidating all startup logic in the entrypoint script.

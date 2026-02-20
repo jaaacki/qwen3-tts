@@ -15,4 +15,31 @@ if ! nvidia-smi --lock-gpu-clocks=0,9999 2>/dev/null; then
   fi
 fi
 
-exec "$@"
+# Enable transparent huge pages if running with sufficient privileges
+# THP reduces TLB pressure for large model weights (~2.4GB = thousands of 4KB pages -> fewer 2MB pages)
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null && \
+    echo "THP: enabled (madvise)" || true
+echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null && \
+    echo "THP defrag: defer+madvise" || true
+
+# Check jemalloc
+if [ -n "$LD_PRELOAD" ] && [ -f "$LD_PRELOAD" ]; then
+    echo "jemalloc loaded: $LD_PRELOAD"
+fi
+
+# Switch to Unix domain socket mode when UNIX_SOCKET_PATH is set (bypasses TCP stack)
+if [ -n "$UNIX_SOCKET_PATH" ]; then
+    exec uvicorn server:app --uds "$UNIX_SOCKET_PATH" \
+        --loop uvloop --http httptools --no-access-log --timeout-keep-alive 65
+fi
+
+# Append TLS args for HTTP/2 support when SSL certs are provided
+TLS_ARGS=""
+if [ -n "$SSL_KEYFILE" ]; then
+    TLS_ARGS="$TLS_ARGS --ssl-keyfile $SSL_KEYFILE"
+fi
+if [ -n "$SSL_CERTFILE" ]; then
+    TLS_ARGS="$TLS_ARGS --ssl-certfile $SSL_CERTFILE"
+fi
+
+exec "$@" $TLS_ARGS

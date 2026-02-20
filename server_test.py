@@ -19,6 +19,8 @@ with patch.dict("sys.modules", _mock_modules):
         _detect_language_unicode, _get_langdetect, detect_language,
         _adjust_speed, resolve_voice, _LANG_MAP,
         _get_cached_ref_audio, _split_sentences, _adaptive_max_tokens,
+        _audio_cache_key, _get_audio_cache, _set_audio_cache,
+        _audio_cache, _AUDIO_CACHE_MAX,
     )
     import server
 
@@ -590,3 +592,65 @@ class TestDetectLanguage:
 
     def test_korean(self):
         assert detect_language("\uc548\ub155\ud558\uc138\uc694") == "Korean"
+
+
+# --- Issue #17: Audio output LRU cache tests ---
+
+
+@pytest.fixture(autouse=False)
+def clear_audio_cache():
+    """Clear the audio cache before and after each test."""
+    _audio_cache.clear()
+    yield
+    _audio_cache.clear()
+
+
+class TestAudioCacheKey:
+    def test_deterministic(self):
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        assert k1 == k2
+
+    def test_different_text_produces_different_key(self):
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("world", "vivian", 1.0, "wav", "English", "")
+        assert k1 != k2
+
+    def test_different_voice_produces_different_key(self):
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "ryan", 1.0, "wav", "English", "")
+        assert k1 != k2
+
+    def test_different_language_produces_different_key(self):
+        k1 = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        k2 = _audio_cache_key("hello", "vivian", 1.0, "wav", "Chinese", "")
+        assert k1 != k2
+
+    def test_key_is_sha256_hex(self):
+        key = _audio_cache_key("hello", "vivian", 1.0, "wav", "English", "")
+        assert len(key) == 64
+        int(key, 16)
+
+
+class TestAudioCacheGetSet:
+    def setup_method(self):
+        _audio_cache.clear()
+
+    def teardown_method(self):
+        _audio_cache.clear()
+
+    def test_cache_miss_returns_none(self):
+        assert _get_audio_cache("nonexistent") is None
+
+    def test_cache_hit_returns_stored_data(self):
+        _set_audio_cache("key1", b"audio_data", "audio/wav")
+        result = _get_audio_cache("key1")
+        assert result is not None
+        assert result[0] == b"audio_data"
+        assert result[1] == "audio/wav"
+
+    def test_cache_disabled_when_max_zero(self):
+        with patch("server._AUDIO_CACHE_MAX", 0):
+            _set_audio_cache("key1", b"data", "audio/wav")
+            assert len(_audio_cache) == 0
+            assert _get_audio_cache("key1") is None

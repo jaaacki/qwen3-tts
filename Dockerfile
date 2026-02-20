@@ -1,3 +1,16 @@
+# Stage 1: builder — install Python deps with build tools
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime AS builder
+
+WORKDIR /build
+
+# git is needed by qwen-tts install
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Stage 2: runtime — lean image with only what's needed
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
@@ -14,28 +27,20 @@ ENV TOKENIZERS_PARALLELISM=false
 ENV OMP_NUM_THREADS=2
 ENV MKL_NUM_THREADS=2
 
-# Install system dependencies (sox needed by qwen-tts audio pipeline)
+# jemalloc replaces ptmalloc2 to reduce RSS bloat from arena fragmentation
+# Path assumes x86_64 Linux; for aarch64 use /usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
+
+# Install runtime-only system dependencies (no git, no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git libsndfile1 ffmpeg sox rubberband-cli \
+    libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python dependencies
-RUN pip install --no-cache-dir \
-    accelerate \
-    soundfile \
-    scipy \
-    fastapi \
-    uvicorn \
-    pydub \
-    python-multipart \
-    qwen-tts \
-    uvloop \
-    httptools \
-    orjson \
-    flash-attn \
-    fasttext-langdetect \
-    pyrubberband
+# Copy installed Python packages from builder
+COPY --from=builder /install /usr/local
 
+# Copy application
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
 

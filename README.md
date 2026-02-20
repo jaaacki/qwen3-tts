@@ -9,8 +9,9 @@ OpenAI-compatible Text-to-Speech API server powered by [Qwen3-TTS-0.6B](https://
 - **OpenAI voice aliases** — alloy, echo, fable, onyx, nova, shimmer
 - **Voice cloning** — generate speech from a reference audio sample
 - **Multi-language** — English, Chinese, Japanese, Korean, German, Italian, Portuguese, Spanish, French, Russian, Beijing dialect, Sichuan dialect
-- **Multiple output formats** — WAV, MP3, FLAC, OGG
+- **Multiple output formats** — WAV, MP3, FLAC, OGG, Opus
 - **Speed control** — adjustable playback speed via resampling
+- **Audio output cache** — LRU cache skips GPU entirely on repeated requests (~1ms vs 500ms+)
 
 ## Requirements
 
@@ -46,7 +47,7 @@ curl -X POST http://localhost:8101/v1/audio/speech \
 |-----------|------|---------|-------------|
 | `input` | string | *required* | Text to synthesize |
 | `voice` | string | `vivian` | Voice name or OpenAI alias |
-| `response_format` | string | `wav` | Output format: `wav`, `mp3`, `flac`, `ogg` |
+| `response_format` | string | `wav` | Output format: `wav`, `mp3`, `flac`, `ogg`, `opus` |
 | `speed` | float | `1.0` | Playback speed multiplier |
 | `language` | string | *auto-detect* | Language override |
 
@@ -91,6 +92,15 @@ curl -X POST http://localhost:8101/v1/audio/speech/clone \
 | `language` | string | *auto-detect* | Language override |
 | `response_format` | string | `wav` | Output format |
 
+### `POST /cache/clear`
+
+Clear the audio output cache. Returns the number of entries cleared.
+
+```bash
+curl -X POST http://localhost:8101/cache/clear
+# {"cleared": 42}
+```
+
 ### `POST /v1/audio/speech/stream/pcm`
 
 Stream speech as raw PCM audio. Text is split into sentences and each sentence is synthesized and streamed as raw int16 bytes. Use the response headers to configure your audio player.
@@ -111,9 +121,42 @@ curl -X POST http://localhost:8101/v1/audio/speech/stream/pcm \
 
 Request body parameters are the same as `/v1/audio/speech`.
 
+### `WS /v1/audio/speech/ws`
+
+WebSocket endpoint for real-time streaming. Send JSON messages, receive binary PCM frames per sentence.
+
+```python
+import asyncio
+import websockets
+import json
+
+async def stream_tts():
+    async with websockets.connect("ws://localhost:8101/v1/audio/speech/ws") as ws:
+        await ws.send(json.dumps({"input": "Hello world. How are you?", "voice": "vivian"}))
+        while True:
+            msg = await ws.recv()
+            if isinstance(msg, str):
+                data = json.loads(msg)
+                if data.get("event") == "done":
+                    break
+            else:
+                # Binary PCM data (16-bit signed, 24kHz, mono)
+                process_audio(msg)
+
+asyncio.run(stream_tts())
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `input` | string | *required* | Text to synthesize |
+| `voice` | string | `vivian` | Voice name or OpenAI alias |
+| `language` | string | *auto-detect* | Language override |
+| `speed` | float | `1.0` | Playback speed multiplier |
+
+
 ### `GET /health`
 
-Returns service status, model info, CUDA availability, and available voices.
+Returns service status, model info, CUDA availability, available voices, and cache stats (`audio_cache_size`, `audio_cache_max`).
 
 ## Configuration
 
@@ -124,16 +167,67 @@ Environment variables in `compose.yaml`:
 | `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face model ID |
 | `IDLE_TIMEOUT` | `120` | Seconds of inactivity before unloading model from GPU (0 = disabled) |
 | `REQUEST_TIMEOUT` | `300` | Maximum seconds per inference request |
+| `AUDIO_CACHE_MAX` | `256` | Max LRU cache entries for audio output (0 = disabled) |
 | `TORCH_COMPILE` | `true` | Enable torch.compile optimization (set to false to disable) |
 | `VAD_TRIM` | `true` | Trim leading/trailing silence from generated audio |
 | `TEXT_NORMALIZE` | `true` | Expand numbers, currency, and abbreviations before synthesis |
 | `VOICE_CACHE_MAX` | `32` | LRU cache capacity for processed voice clone reference audio (0 = disabled) |
+| `PRELOAD_MODEL` | `false` | Load model at startup instead of on first request |
+| `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics at `GET /metrics` |
+| `INFERENCE_CPU_CORES` | *(empty)* | Pin to specific CPU cores (e.g., `0-7`). Empty = no pinning |
+| `UNIX_SOCKET_PATH` | *(empty)* | Path to Unix socket (e.g., `/tmp/tts.sock`). Replaces TCP when set |
+| `SSL_KEYFILE` | *(empty)* | Path to TLS private key (enables HTTP/2) |
+| `SSL_CERTFILE` | *(empty)* | Path to TLS certificate (enables HTTP/2) |
+| `LOG_FORMAT` | `json` | Log format: `json` for structured output, `text` for human-readable |
+| `MAX_QUEUE_DEPTH` | `5` | Max queued requests before 503 rejection (0 = unlimited) |
 
 The model cache is persisted to `./models` via volume mount.
+
+### Unix Domain Socket (optional)
+
+For same-host clients, UDS bypasses the TCP stack (~0.1-0.5ms savings per request):
+
+```yaml
+# compose.yaml
+environment:
+  - UNIX_SOCKET_PATH=/tmp/tts.sock
+volumes:
+  - /tmp:/tmp  # share socket with host
+```
+
+Connect from Python:
+```python
+import httpx
+transport = httpx.AsyncHTTPTransport(uds="/tmp/tts.sock")
+async with httpx.AsyncClient(transport=transport) as client:
+    resp = await client.post("http://localhost/v1/audio/speech", json={...})
+```
+
+### Transparent Huge Pages (optional)
+
+For optimal model loading performance, enable THP on the Docker host:
+
+```bash
+echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo defer+madvise | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+```
+
+The container attempts to set these at startup but may need `--privileged` or appropriate capabilities. If the host already has THP enabled, no container privileges are needed.
 
 ### GPU Memory Management
 
 The model loads **on-demand** with the first request and automatically **unloads after idle timeout** to free VRAM for other services. This is ideal for shared GPU environments.
+
+### Always-On Mode
+
+For dedicated GPU servers where you want the model to stay loaded permanently, set `IDLE_TIMEOUT=0`:
+
+```yaml
+environment:
+  - IDLE_TIMEOUT=0  # Never unload — model stays in VRAM
+```
+
+The idle watchdog still runs but skips the unload check. The model loads on first request and remains loaded until the server shuts down.
 
 ## Testing
 
