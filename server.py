@@ -124,6 +124,15 @@ def _load_model_sync():
         attn_implementation=attn_impl,
     )
 
+    # Compile model for faster inference (PyTorch 2.0+)
+    if os.getenv("TORCH_COMPILE", "true").lower() == "true":
+        try:
+            import torch._dynamo  # noqa: F401
+            model.model = torch.compile(model.model, mode="reduce-overhead", fullgraph=False)
+            print("torch.compile enabled on model (mode=reduce-overhead)")
+        except Exception as e:
+            print(f"torch.compile not available or failed: {e}")
+
     # Warmup inference to trigger CUDA kernel caching
     if torch.cuda.is_available():
         print("Warming up GPU...")

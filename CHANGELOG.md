@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #9: Enable torch.compile] — 2026-02-20
+### Added
+- `torch.compile` on model forward pass with `reduce-overhead` mode for faster inference (#9)
+- `TORCH_COMPILE` env var (default: true) to opt-in/out of compilation
+
 ## [Unreleased — Issue #8: Switch to flash_attention_2] — 2026-02-20
 ### Changed
 - Switch attention implementation from `sdpa` to `flash_attention_2` with graceful fallback (#8)

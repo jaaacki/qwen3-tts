@@ -158,3 +158,18 @@ Switched the model's attention implementation from PyTorch's native SDPA to Flas
 Hardware requirement: Flash Attention 2 requires Ampere or newer GPUs (compute capability >= 8.0). This means RTX 3000/4000 series, A100, H100. On older hardware (V100, RTX 2000), the `flash-attn` package either won't install or won't work at runtime.
 
 The fallback pattern is a simple try/except on `import flash_attn`. If the import fails, we fall back to `sdpa` (PyTorch's built-in scaled dot product attention). This means the code works on any GPU — it just runs faster on newer ones. The check happens at model load time, not at import time, so the server starts correctly even without flash-attn installed.
+
+---
+
+## Entry 0010 — torch.compile: the first-inference cost
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #9
+
+Enabled `torch.compile(model.model, mode="reduce-overhead", fullgraph=False)` after model loading. This tells PyTorch to trace the model's forward pass and generate optimized CUDA kernels, eliminating Python overhead on subsequent calls.
+
+The trade-off is first-inference latency. The first call after compilation triggers the tracing/compiling step, which can take 10-30 seconds depending on model size and GPU. After that, every subsequent inference is faster. For a TTS server that loads the model once and runs many requests, this is a clear win -- the compilation cost is amortized across all requests.
+
+`mode="reduce-overhead"` uses CUDA graphs which are ideal for repeated inference with similar-shaped inputs (exactly the TTS use case). `fullgraph=False` allows partial compilation if some operations aren't compilable, avoiding hard failures.
+
+The `TORCH_COMPILE` env var (default true) provides an escape hatch for environments where compilation causes issues (older PyTorch versions, unsupported ops).
