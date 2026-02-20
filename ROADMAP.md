@@ -25,7 +25,7 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 
 - [x] #5 Enable TF32 matmul mode
 - [x] #6 Enable GPU persistence mode
-- [ ] #7 Lock GPU clocks to max boost
+- [x] #7 Lock GPU clocks to max boost
 - [ ] #8 Switch `attn_implementation` to `flash_attention_2`
 - [ ] #9 Enable `torch.compile` on model forward pass
 - [ ] #10 Deepen GPU warmup with multi-length synthesis calls
