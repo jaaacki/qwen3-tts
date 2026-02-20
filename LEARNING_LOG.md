@@ -136,3 +136,18 @@ The improvement plan includes three layers of caching, and the ordering from hig
 The ordering matters for implementation priority. The output cache collapses the entire pipeline for repeated requests — inference, audio encoding, everything. One dict lookup replaces all of it. The voice prompt cache only saves preprocessing. The KV cache only saves part of inference. In terms of implementation effort, the output cache is roughly 20 lines of code. The voice prompt cache is similar. The KV cache is an open research question.
 
 For the phone call use case, the realistic expectation is that the output cache provides the majority of the benefit. IVR menus, hold messages, greeting phrases, and common system responses repeat constantly. A deployment serving 1000 calls per day with 20 unique system phrases would see cache hit rates above 90% after the first few calls. The per-request cost drops from 500ms of GPU inference to 1ms of memory lookup.
+
+---
+
+## Entry 0008 — TF32: why it is safe for this model
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #5
+
+TF32 (TensorFloat-32) is a numeric format available on Ampere and newer NVIDIA GPUs. It uses the same 8-bit exponent as float32 but truncates the mantissa from 23 bits to 10 bits, allowing matrix multiplications to run on Tensor Core hardware at roughly 3x the throughput.
+
+The safety argument for enabling TF32 on this model is straightforward: the model already runs in bfloat16, which has only 7 bits of mantissa. TF32 intermediate operations have 10 bits of mantissa — strictly more precision than the model's own weight format. Enabling TF32 cannot lose information that bfloat16 already discards.
+
+Two separate flags are needed: `torch.backends.cuda.matmul.allow_tf32` controls general matrix multiplication, and `torch.backends.cudnn.allow_tf32` controls cuDNN convolution operations. Both default to False in PyTorch. On pre-Ampere GPUs these flags are no-ops — the hardware simply ignores them.
+
+The test strategy uses mock-based reimport rather than `if torch.cuda.is_available()` guards. This ensures tests actually assert on non-CUDA CI machines instead of silently passing. The pattern: reset flags to False, mock `cuda.is_available` to return True, reimport the server module, verify flags became True.
