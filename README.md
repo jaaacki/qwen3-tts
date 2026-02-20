@@ -11,6 +11,7 @@ OpenAI-compatible Text-to-Speech API server powered by [Qwen3-TTS-0.6B](https://
 - **Multi-language** — English, Chinese, Japanese, Korean, German, Italian, Portuguese, Spanish, French, Russian, Beijing dialect, Sichuan dialect
 - **Multiple output formats** — WAV, MP3, FLAC, OGG
 - **Speed control** — adjustable playback speed via resampling
+- **Audio output cache** — LRU cache skips GPU entirely on repeated requests (~1ms vs 500ms+)
 
 ## Requirements
 
@@ -70,9 +71,18 @@ curl -X POST http://localhost:8101/v1/audio/speech/clone \
 | `language` | string | *auto-detect* | Language override |
 | `response_format` | string | `wav` | Output format |
 
+### `POST /cache/clear`
+
+Clear the audio output cache. Returns the number of entries cleared.
+
+```bash
+rtk curl -X POST http://localhost:8101/cache/clear
+# {"cleared": 42}
+```
+
 ### `GET /health`
 
-Returns service status, model info, CUDA availability, and available voices.
+Returns service status, model info, CUDA availability, available voices, and cache stats (`audio_cache_size`, `audio_cache_max`).
 
 ## Configuration
 
@@ -83,6 +93,7 @@ Environment variables in `compose.yaml`:
 | `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face model ID |
 | `IDLE_TIMEOUT` | `120` | Seconds of inactivity before unloading model from GPU (0 = disabled) |
 | `REQUEST_TIMEOUT` | `300` | Maximum seconds per inference request |
+| `AUDIO_CACHE_MAX` | `256` | Max LRU cache entries for audio output (0 = disabled) |
 
 The model cache is persisted to `./models` via volume mount.
 

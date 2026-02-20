@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased — Issue #17: Audio output LRU cache] — 2026-02-20
+### Added
+- Audio output LRU cache — in-memory cache keyed by SHA-256 of (text, voice, speed, format, language, instruct); cache hit returns bytes in ~1ms, skipping GPU entirely (#17)
+- `POST /cache/clear` endpoint — clears audio cache, returns count of evicted entries (#17)
+- `AUDIO_CACHE_MAX` env var — max cache entries (default 256, set to 0 to disable) (#17)
+- Cache info in `/health` — `audio_cache_size` and `audio_cache_max` fields (#17)
+- Voice clone endpoint is intentionally not cached — clone inputs (ref audio) are unlikely to repeat
+
 ## [Unreleased — Issue #36: remove dead VoiceCloneRequest] — 2026-02-20
 ### Changed
 - Remove unused `VoiceCloneRequest` Pydantic model from `server.py` — the `/clone` endpoint uses `Form()` parameters directly; model was dead code (#36)
