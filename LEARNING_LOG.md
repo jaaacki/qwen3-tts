@@ -224,3 +224,18 @@ The trade-off is first-inference latency. The first call after compilation trigg
 `mode="reduce-overhead"` uses CUDA graphs which are ideal for repeated inference with similar-shaped inputs (exactly the TTS use case). `fullgraph=False` allows partial compilation if some operations aren't compilable, avoiding hard failures.
 
 The `TORCH_COMPILE` env var (default true) provides an escape hatch for environments where compilation causes issues (older PyTorch versions, unsupported ops).
+
+---
+
+## Entry 0011 — TF32: why it is safe for this model
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #5
+
+TF32 (TensorFloat-32) is a numeric format available on Ampere and newer NVIDIA GPUs. It uses the same 8-bit exponent as float32 but truncates the mantissa from 23 bits to 10 bits, allowing matrix multiplications to run on Tensor Core hardware at roughly 3x the throughput.
+
+The safety argument for enabling TF32 on this model is straightforward: the model already runs in bfloat16, which has only 7 bits of mantissa. TF32 intermediate operations have 10 bits of mantissa — strictly more precision than the model's own weight format. Enabling TF32 cannot lose information that bfloat16 already discards.
+
+Two separate flags are needed: `torch.backends.cuda.matmul.allow_tf32` controls general matrix multiplication, and `torch.backends.cudnn.allow_tf32` controls cuDNN convolution operations. Both default to False in PyTorch. On pre-Ampere GPUs these flags are no-ops — the hardware simply ignores them.
+
+The test strategy uses mock-based reimport rather than `if torch.cuda.is_available()` guards. This ensures tests actually assert on non-CUDA CI machines instead of silently passing. The pattern: reset flags to False, mock `cuda.is_available` to return True, reimport the server module, verify flags became True.
