@@ -83,6 +83,7 @@ Environment variables in `compose.yaml`:
 | `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face model ID |
 | `IDLE_TIMEOUT` | `120` | Seconds of inactivity before unloading model from GPU (0 = disabled) |
 | `REQUEST_TIMEOUT` | `300` | Maximum seconds per inference request |
+| `TORCH_COMPILE` | `true` | Enable torch.compile optimization (set to false to disable) |
 
 The model cache is persisted to `./models` via volume mount.
 
