@@ -20,6 +20,10 @@ services:
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
       - MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
       - INFERENCE_CPU_CORES=
+      # TLS cert paths enable HTTP/2 (h2c cleartext HTTP/2 not supported by most clients)
+      # Set both to PEM file paths inside the container to enable HTTPS + HTTP/2
+      - SSL_KEYFILE=
+      - SSL_CERTFILE=
     volumes:
       - ./models:/root/.cache/huggingface
     ipc: host  # Share host IPC namespace — reduces CUDA IPC overhead for GPU tensor sharing

@@ -27,4 +27,13 @@ if [ -n "$LD_PRELOAD" ] && [ -f "$LD_PRELOAD" ]; then
     echo "jemalloc loaded: $LD_PRELOAD"
 fi
 
-exec "$@"
+# Append TLS args for HTTP/2 support when SSL certs are provided
+TLS_ARGS=""
+if [ -n "$SSL_KEYFILE" ]; then
+    TLS_ARGS="$TLS_ARGS --ssl-keyfile $SSL_KEYFILE"
+fi
+if [ -n "$SSL_CERTFILE" ]; then
+    TLS_ARGS="$TLS_ARGS --ssl-certfile $SSL_CERTFILE"
+fi
+
+exec "$@" $TLS_ARGS
