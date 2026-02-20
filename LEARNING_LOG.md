@@ -136,3 +136,12 @@ The improvement plan includes three layers of caching, and the ordering from hig
 The ordering matters for implementation priority. The output cache collapses the entire pipeline for repeated requests — inference, audio encoding, everything. One dict lookup replaces all of it. The voice prompt cache only saves preprocessing. The KV cache only saves part of inference. In terms of implementation effort, the output cache is roughly 20 lines of code. The voice prompt cache is similar. The KV cache is an open research question.
 
 For the phone call use case, the realistic expectation is that the output cache provides the majority of the benefit. IVR menus, hold messages, greeting phrases, and common system responses repeat constantly. A deployment serving 1000 calls per day with 20 unique system phrases would see cache hit rates above 90% after the first few calls. The per-request cost drops from 500ms of GPU inference to 1ms of memory lookup.
+
+---
+
+## Entry 0008 — GPU persistence mode and the entrypoint pattern
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #6
+
+We introduced `docker-entrypoint.sh` as the container's ENTRYPOINT, running GPU tuning commands before exec-ing into uvicorn. GPU settings like `nvidia-smi -pm 1` cannot be baked into the image at build time (no GPU during build). The entrypoint runs at container start when the GPU is available via NVIDIA runtime. The `|| echo` pattern ensures the service starts even without sufficient permissions.
