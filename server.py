@@ -7,15 +7,16 @@ import torch
 import soundfile as sf
 import hashlib
 import io
+import json
 import os
 import gc
 import asyncio
 import time
 import re
+import uuid
 import numpy as np
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-import re as _re
 import scipy.signal as scipy_signal
 import logging
 import base64
@@ -49,6 +50,40 @@ if PROMETHEUS_ENABLED:
         _prometheus_available = False
 else:
     _prometheus_available = False
+
+# Structured JSON logging
+LOG_FORMAT = os.getenv("LOG_FORMAT", "json")
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_obj = {
+            "timestamp": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        # Include extra fields passed via extra= kwarg
+        if hasattr(record, "extra_fields"):
+            log_obj.update(record.extra_fields)
+        return json.dumps(log_obj)
+
+
+def _setup_logging():
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    if LOG_FORMAT == "json":
+        handler.setFormatter(JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s"
+        ))
+    root.handlers = [handler]
+
+
+_setup_logging()
+logger = logging.getLogger("qwen3-tts")
 
 try:
     from pydub import AudioSegment as _PydubAudioSegment
@@ -628,6 +663,7 @@ async def _encode_audio_async(audio_data, sample_rate, output_format):
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
     """OpenAI-compatible TTS endpoint using CustomVoice model."""
+    request_id = str(uuid.uuid4())[:8]
     t_start = time.perf_counter()
     if not request.input or not request.input.strip():
         raise HTTPException(status_code=400, detail="Input text is required")
@@ -659,7 +695,7 @@ async def synthesize_speech(request: TTSRequest):
         t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
-            t_infer_start = time.perf_counter()
+            t_queue_done = time.perf_counter()
             wavs, sr = await asyncio.wait_for(
                 loop.run_in_executor(
                     _infer_executor,
@@ -667,7 +703,7 @@ async def synthesize_speech(request: TTSRequest):
                 ),
                 timeout=REQUEST_TIMEOUT
             )
-        t_infer_end = time.perf_counter()
+        t_infer_done = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
@@ -680,28 +716,29 @@ async def synthesize_speech(request: TTSRequest):
         audio_bytes, content_type = await _encode_audio_async(
             audio_data, sr, request.response_format
         )
-        t_end = time.perf_counter()
+        t_encode_done = time.perf_counter()
 
         logger.info(
-            "request_complete",
-            extra={
+            "synthesis_complete",
+            extra={"extra_fields": {
+                "request_id": request_id,
                 "endpoint": "/v1/audio/speech",
-                "queue_ms": round((t_infer_start - t_queue) * 1000, 1),
-                "inference_ms": round((t_infer_end - t_infer_start) * 1000, 1),
-                "encode_ms": round((t_end - t_infer_end) * 1000, 1),
-                "total_ms": round((t_end - t_start) * 1000, 1),
-                "chars": len(text),
                 "voice": speaker,
-                "format": request.response_format,
                 "language": language,
-            },
+                "chars": len(text),
+                "format": request.response_format,
+                "queue_ms": round((t_queue_done - t_queue) * 1000),
+                "infer_ms": round((t_infer_done - t_queue_done) * 1000),
+                "encode_ms": round((t_encode_done - t_infer_done) * 1000),
+                "total_ms": round((t_encode_done - t_start) * 1000),
+            }},
         )
 
         _set_audio_cache(cache_key, audio_bytes, content_type)
 
         if _prometheus_available:
             tts_requests_total.labels(voice=speaker, format=request.response_format).inc()
-            tts_inference_duration.observe(t_infer_end - t_infer_start)
+            tts_inference_duration.observe(t_infer_done - t_queue_done)
 
         return Response(
             content=audio_bytes,

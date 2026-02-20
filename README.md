@@ -178,6 +178,7 @@ Environment variables in `compose.yaml`:
 | `UNIX_SOCKET_PATH` | *(empty)* | Path to Unix socket (e.g., `/tmp/tts.sock`). Replaces TCP when set |
 | `SSL_KEYFILE` | *(empty)* | Path to TLS private key (enables HTTP/2) |
 | `SSL_CERTFILE` | *(empty)* | Path to TLS certificate (enables HTTP/2) |
+| `LOG_FORMAT` | `json` | Log format: `json` for structured output, `text` for human-readable |
 
 The model cache is persisted to `./models` via volume mount.
 
