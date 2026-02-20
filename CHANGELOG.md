@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #29: Add ipc:host for CUDA IPC] — 2026-02-20
+### Changed
+- Added `ipc: host` to Docker compose for CUDA IPC namespace sharing (#29)
+
 ## [Unreleased — Issue #35: Multi-stage Docker build] — 2026-02-20
 ### Changed
 - Dockerfile converted to multi-stage build — builder stage installs deps, runtime stage ships only packages and runtime libs (no git, no build tools) (#35)

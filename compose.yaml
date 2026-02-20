@@ -19,6 +19,7 @@ services:
       - PRELOAD_MODEL=false     # true = load model at startup instead of first request
     volumes:
       - ./models:/root/.cache/huggingface
+    ipc: host  # Share host IPC namespace — reduces CUDA IPC overhead for GPU tensor sharing
     shm_size: "1g"
     deploy:
       resources:
