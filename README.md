@@ -145,6 +145,17 @@ The model cache is persisted to `./models` via volume mount.
 
 The model loads **on-demand** with the first request and automatically **unloads after idle timeout** to free VRAM for other services. This is ideal for shared GPU environments.
 
+### Always-On Mode
+
+For dedicated GPU servers where you want the model to stay loaded permanently, set `IDLE_TIMEOUT=0`:
+
+```yaml
+environment:
+  - IDLE_TIMEOUT=0  # Never unload — model stays in VRAM
+```
+
+The idle watchdog still runs but skips the unload check. The model loads on first request and remains loaded until the server shuts down.
+
 ## Testing
 
 ```bash
