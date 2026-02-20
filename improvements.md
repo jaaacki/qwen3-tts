@@ -2,6 +2,8 @@
 
 **Goal**: High-quality, real-time TTS — sub-500ms first-audio latency, maximum output quality, production-grade observability.
 
+> **Scope**: Keeping Qwen3-TTS-0.6B as-is — no model swap, no quantization. All items below work with the current model unchanged.
+
 ---
 
 ## Quick Reference Table
@@ -612,6 +614,636 @@ Before and after each P0/P1 change, measure:
 
 - **Flash Attention 2 build time**: `flash-attn` compiles from source (~5 min). Pin a pre-built wheel if available for CUDA 12.4 + Python 3.10/3.11 to avoid this on every build.
 - **torch.compile graph breaks**: If `Qwen3TTSModel` uses Python control flow inside forward, compile may silently fall back to eager mode. Check logs for `torch._dynamo` warnings.
-- **1.7B model**: Verify the exact HuggingFace model ID before deploying — Qwen publishes multiple 1.7B variants (base, instruct, CustomVoice, CustomDesign).
 - **Streaming format compatibility**: OpenAI's streaming TTS uses chunked MP3. For maximum OpenAI SDK compatibility, stream as chunked WAV or raw PCM and document the difference.
 - **IDLE_TIMEOUT with streaming**: With sentence-chunked streaming, long texts keep the model alive across multiple synthesis calls within one request. Ensure `_last_used` is updated per-chunk, not just per-request.
+
+---
+
+---
+
+# Addendum — Round 2: Everything Else
+
+The first pass covered streaming and inference flags. This addendum covers **six more complete categories** that were entirely missed.
+
+## Addendum Quick Reference
+
+| # | Priority | Category | Improvement | Latency Gain | Quality Gain | Complexity |
+|---|----------|----------|-------------|-------------|-------------|------------|
+| A1 | 🔴 P0 | Inference Param | Adaptive `max_new_tokens` (scale with text length) | **−30–60% short texts** | — | Very Low |
+| A2 | 🟠 P1 | GPU Tuning | TF32 matmul mode (`allow_tf32 = True`) | **−8–12%** | — | Very Low |
+| A3 | 🟠 P1 | GPU Tuning | GPU persistence mode (`nvidia-smi -pm 1`) | **−200–500ms cold** | — | Very Low |
+| A4 | 🟠 P1 | GPU Tuning | Lock GPU clocks to max boost | **−5–15%** jitter | — | Low |
+| A5 | 🟠 P1 | Caching | Full audio output cache (text+voice → bytes) | **−100% for repeats** | — | Medium |
+| A6 | 🟠 P1 | Audio | VAD silence trimming (strip leading/trailing silence) | **−10–20%** audio len | +minor | Low |
+| A7 | 🟡 P2 | Audio | Opus codec for streaming (lower latency than WAV/MP3) | **−40% bandwidth** | — | Low |
+| A8 | 🟡 P2 | Audio | GPU-accelerated audio processing (torchaudio CUDA) | **−5–15ms** encoding | — | Low |
+| A9 | 🟡 P2 | Audio | Async pipeline: encode chunk N while synthesizing N+1 | **−chunk_encode_ms** | — | Medium |
+| A10 | 🟡 P2 | System | jemalloc memory allocator (`LD_PRELOAD`) | −GC jitter | — | Very Low |
+| A11 | 🟡 P2 | System | CPU affinity: pin inference thread to GPU-adjacent cores | **−1–3ms** scheduling | — | Low |
+| A12 | 🟡 P2 | System | Transparent huge pages for model weights | −TLB pressure | — | Very Low |
+| A13 | 🟡 P2 | Protocol | WebSockets (replace SSE, true bidirectional streaming) | perceived real-time | — | Medium |
+| A14 | 🟡 P2 | Protocol | HTTP/2 (`--http h2`) for multiplexed concurrent requests | −connection overhead | — | Low |
+| A15 | 🟡 P2 | Protocol | Unix domain socket (same-host clients bypass TCP) | **−0.1–0.5ms/req** | — | Low |
+| A16 | 🟢 P3 | Lifecycle | Always-on mode (disable idle unload for dedicated GPU) | −reload latency | — | Very Low |
+| A17 | 🟢 P3 | Lifecycle | Eager startup load (load model at container start) | −first-req cold start | — | Very Low |
+| A18 | 🟢 P3 | Docker | `--ipc=host` for faster CUDA IPC in container | −CUDA overhead | — | Very Low |
+| A19 | 🟢 P3 | Docker | `--network=host` (single-host deployment) | −network stack | — | Very Low |
+| A20 | 🟢 P3 | Observability | Per-request latency breakdown (load/infer/encode/transfer) | — | — | Low |
+
+---
+
+## A1. Adaptive `max_new_tokens` — Easiest Big Win
+
+**This is the most impactful single-line change in the whole document.**
+
+Right now `gen_kwargs = {"max_new_tokens": 2048}` is hardcoded for **every single request** — a 3-word input gets the same generation budget as a 500-word essay. The model still stops at EOS, but the inference engine allocates KV-cache and manages attention over that full budget, wasting memory bandwidth proportionally.
+
+**How the model's codec rate maps to tokens:**
+- The model name says `12Hz` — 12 codec tokens per second of audio output
+- Average speech: ~150 words/minute = 2.5 words/second = ~5 codec tokens/word
+- For a 10-word input: ~50 tokens needed → 2048 budget is **40× too large**
+
+**Formula:**
+```python
+# Words × ~8 tokens/word (with 60% safety buffer), floor at 128, cap at 2048
+def _adaptive_max_tokens(text: str) -> int:
+    word_count = len(text.split())
+    return max(128, min(2048, word_count * 8))
+
+gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+```
+
+**Expected gain**: For short texts (≤20 words, most real-world TTS use cases), latency drops 30–60% because the model's generation loop exits sooner and KV-cache is smaller. For long texts (>200 words) the effect diminishes but there's no regression.
+
+**Tasks**:
+- [ ] Add `_adaptive_max_tokens(text: str) -> int` function
+- [ ] Replace both hardcoded `{"max_new_tokens": 2048}` in `synthesize_speech` and `clone_voice`
+- [ ] Add `MAX_NEW_TOKENS` env var override for tuning (default: adaptive)
+- [ ] Benchmark: measure 5-word, 20-word, 100-word inputs before/after
+
+---
+
+## A2. TF32 Matmul Mode — Free ~10% on Ampere+
+
+**What**: On Ampere+ GPUs (RTX 3000/4000 series, A100, H100), PyTorch defaults to `allow_tf32 = False` for reproducibility. TF32 uses the full 8-bit exponent of FP32 but rounds the mantissa to 10 bits — nearly identical numerical results to FP32 but uses Tensor Core hardware (3× faster matmul).
+
+Since the model is already running in bfloat16, enabling TF32 affects intermediate matmul operations and has negligible quality impact.
+
+```python
+# Add immediately after the cudnn.benchmark line (server.py line 23):
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True   # ADD THIS
+    torch.backends.cudnn.allow_tf32 = True          # ADD THIS
+```
+
+**Gain**: 8–12% inference speedup at zero cost on supported GPUs. No-op on older hardware.
+
+**Tasks**:
+- [ ] Add two `allow_tf32` lines after existing `cudnn.benchmark` line
+- [ ] Verify GPU is Ampere+ (`nvidia-smi --query-gpu=name --format=csv`)
+
+---
+
+## A3. GPU Persistence Mode — Eliminate Cold-Start Penalty
+
+**What**: By default, NVIDIA GPUs power-down between workloads and re-initialize when first accessed. This adds 200–500ms to the first inference after the GPU has been idle. With `nvidia-smi -pm 1`, the GPU stays initialized.
+
+**This is the main reason the first request after a long idle is noticeably slower than subsequent ones — even with the model still loaded.**
+
+```bash
+# Run once at host startup (persists until reboot or nvidia-smi -pm 0):
+nvidia-smi -pm 1
+
+# Or add to compose.yaml entrypoint:
+entrypoint: sh -c "nvidia-smi -pm 1 && exec uvicorn server:app ..."
+```
+
+**For Docker**: Requires `privileged: true` or `cap_add: [SYS_ADMIN]` in compose.yaml if the container needs to set it itself. Better to set it on the host.
+
+**Tasks**:
+- [ ] Add `nvidia-smi -pm 1` to host startup script / systemd unit
+- [ ] Or add to compose.yaml pre-start hook
+- [ ] Measure: time first inference after 5 min idle vs baseline
+
+---
+
+## A4. Lock GPU Clocks to Max Boost
+
+**What**: GPUs dynamically scale clocks based on temperature and power draw. Under sustained load the clock ramps up, but for short bursts (a single TTS inference lasting 500ms) the clock may not reach boost frequency before inference completes. Locking clocks eliminates this ramp-up latency and variance.
+
+```bash
+# Lock to max boost clocks (replace 1980 with your GPU's max boost MHz):
+nvidia-smi -lgc 1980,1980
+
+# Find your GPU's max clock:
+nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader
+
+# Reset to auto:
+nvidia-smi -rgc
+```
+
+**Effect**: Reduces p99 latency variance by 5–15%. Most impactful for spiky/burst workloads.
+
+**Tradeoff**: Higher idle power consumption, potentially higher GPU temperature. Monitor thermals.
+
+**Tasks**:
+- [ ] Find max boost clock for target GPU
+- [ ] Add `nvidia-smi -lgc <MAX>,<MAX>` to host startup script
+- [ ] Monitor GPU temperature under sustained load (`nvidia-smi dmon -s t`)
+
+---
+
+## A5. Full Audio Output Cache
+
+**What**: TTS output is deterministic — same `(text, voice, language, speed)` input always produces the same audio bytes. Cache the final encoded bytes in an LRU cache. A cache hit costs ~1ms (memory lookup) vs ~500–2000ms (full synthesis). This is the highest ROI for any workload with repeated phrases.
+
+**Use cases**: IVR menus ("Press 1 for...", "Welcome to..."), notification templates, repeated phrases in demos.
+
+```python
+import hashlib
+from functools import lru_cache
+
+# In-process LRU cache (simple, no Redis needed)
+_audio_cache: dict[str, bytes] = {}
+_AUDIO_CACHE_MAX = int(os.getenv("AUDIO_CACHE_MAX", "256"))  # entries
+
+def _audio_cache_key(text: str, voice: str, language: str, speed: float, fmt: str) -> str:
+    raw = f"{text}|{voice}|{language}|{speed:.3f}|{fmt}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+# In synthesize_speech(), before inference:
+cache_key = _audio_cache_key(text, speaker, language, request.speed, request.response_format)
+if cache_key in _audio_cache:
+    return Response(content=_audio_cache[cache_key], media_type=content_type, ...)
+
+# After encoding:
+if len(_audio_cache) >= _AUDIO_CACHE_MAX:
+    _audio_cache.pop(next(iter(_audio_cache)))  # evict oldest
+_audio_cache[cache_key] = audio_bytes
+```
+
+**For distributed deployments**: Replace dict with Redis (`redis-py` + `asyncio` client). Key TTL of 24h. Serialized audio bytes as value.
+
+**Tasks**:
+- [ ] Implement in-memory LRU audio cache with configurable size
+- [ ] Add cache hit/miss counters to `/health`
+- [ ] Add `AUDIO_CACHE_MAX=0` to disable (default 256)
+- [ ] Optional: add Redis backend with `REDIS_URL` env var
+
+---
+
+## A6. VAD Silence Trimming
+
+**What**: TTS models often generate 100–300ms of silence at the start and end of audio. This silence wastes bandwidth, adds perceived latency, and can cause awkward pauses in real-time applications. Trim it with a simple amplitude threshold.
+
+**Implementation** (pure numpy, no new deps):
+```python
+def trim_silence(audio: np.ndarray, threshold_db: float = -50.0, frame_ms: int = 10, sr: int = 24000) -> np.ndarray:
+    """Remove leading and trailing silence below threshold."""
+    threshold_linear = 10 ** (threshold_db / 20.0)
+    frame_size = int(sr * frame_ms / 1000)
+
+    # Find first and last frame above threshold
+    frames = [audio[i:i+frame_size] for i in range(0, len(audio), frame_size)]
+    rms = [np.sqrt(np.mean(f**2)) for f in frames]
+
+    active = [i for i, r in enumerate(rms) if r > threshold_linear]
+    if not active:
+        return audio
+
+    start = max(0, active[0] * frame_size - frame_size)   # 1 frame padding
+    end = min(len(audio), (active[-1] + 2) * frame_size)  # 1 frame padding
+    return audio[start:end]
+
+# Apply after squeeze(), before speed adjustment:
+audio_data = trim_silence(audio_data, threshold_db=-45.0, sr=sr)
+```
+
+**Gain**: Reduces audio length by 5–20% for short phrases. Eliminates the "gap" before speech starts in streaming scenarios. Improves perceived responsiveness.
+
+**Tasks**:
+- [ ] Implement `trim_silence()` using pure numpy
+- [ ] Apply after `audio_data.squeeze()` in both endpoints
+- [ ] Add `SILENCE_THRESHOLD_DB` env var (default -45)
+- [ ] Test: verify speech content is not clipped on fast/loud starts
+
+---
+
+## A7. Opus Codec for Streaming
+
+**What**: When streaming audio over a network, the choice of codec matters enormously for latency and bandwidth:
+
+| Codec | Latency | Bitrate (speech quality) | Chunked streaming |
+|-------|---------|--------------------------|-------------------|
+| WAV | 0ms encode | ~768kbps | Works but huge |
+| MP3 | ~50ms encode | 64–128kbps | Works |
+| FLAC | ~20ms encode | ~300kbps | Works |
+| **Opus** | **2.5ms encode** | **16–32kbps** | **Designed for it** |
+
+Opus was specifically designed for real-time audio streaming (used by WebRTC, Discord, Spotify). At 32kbps it sounds better than MP3 at 128kbps for speech.
+
+```python
+# pip install pyogg opuslib (or use ffmpeg via pydub)
+import subprocess
+
+def encode_opus(audio_np: np.ndarray, sample_rate: int, bitrate: int = 32000) -> bytes:
+    """Encode float32 numpy audio to Opus in OGG container via ffmpeg."""
+    pcm = (audio_np * 32767).astype(np.int16).tobytes()
+    result = subprocess.run([
+        "ffmpeg", "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
+        "-i", "pipe:0", "-c:a", "libopus", "-b:a", str(bitrate),
+        "-f", "ogg", "pipe:1"
+    ], input=pcm, capture_output=True)
+    return result.stdout
+```
+
+**Better approach**: Use `opuslib` or `soundfile`'s OGG+Opus support for zero subprocess overhead.
+
+**Tasks**:
+- [ ] Verify ffmpeg build has `libopus` (`ffmpeg -codecs | grep opus`)
+- [ ] Add `opus` as valid `response_format` option
+- [ ] Implement Opus encoding in `convert_audio_format()`
+- [ ] Benchmark: compare Opus 32kbps vs WAV encode time + bytes transferred
+
+---
+
+## A8. GPU-Accelerated Audio Processing
+
+**What**: After synthesis, audio processing (resampling for speed, potentially format normalization) runs on CPU with numpy/scipy. These operations can run on GPU with `torchaudio` — keeping data on GPU avoids a round-trip through CPU RAM.
+
+```python
+import torchaudio
+
+def speed_adjust_gpu(audio_np: np.ndarray, sr: int, speed: float) -> np.ndarray:
+    """Pitch-preserving speed adjustment on GPU using torchaudio."""
+    audio_t = torch.from_numpy(audio_np).unsqueeze(0).cuda()  # [1, T]
+    # torchaudio.functional.resample preserves pitch via sinc interpolation
+    new_sr = int(sr * speed)
+    audio_t = torchaudio.functional.resample(audio_t, sr, new_sr)
+    return audio_t.squeeze().cpu().numpy()
+```
+
+**Also**: `torchaudio.functional.vad()` for silence trimming on GPU (replaces the numpy VAD in A6).
+
+**Tasks**:
+- [ ] Add `torchaudio` to Dockerfile (often already included with PyTorch image — check first)
+- [ ] Replace scipy speed adjustment with torchaudio GPU version when CUDA available
+- [ ] Benchmark: CPU scipy vs GPU torchaudio for 5s audio resampling
+
+---
+
+## A9. Async Audio Encode Pipeline (Overlap with Synthesis)
+
+**What**: In the sentence-chunked streaming flow (item #1), there is dead time between when sentence N's audio comes back from GPU and when it's fully encoded into WAV/MP3 bytes. The next synthesis (sentence N+1) can't start until encoding finishes (they share the semaphore). By running audio encoding in a separate CPU thread concurrently with the next GPU synthesis, we eliminate this dead time.
+
+**Flow** (current):
+```
+[synthesize N] → [encode N] → [send N] → [synthesize N+1] → [encode N+1] → ...
+                  ^-- blocks next synthesis
+```
+
+**Flow** (optimized):
+```
+[synthesize N] → [encode N in CPU thread] → [send N]
+                  [synthesize N+1]    ← runs in parallel with encode N
+                                      → [encode N+1 in CPU thread] → ...
+```
+
+**Implementation**: Use a second `ThreadPoolExecutor` with `max_workers=2` for audio encoding, run alongside `_infer_semaphore` release.
+
+**Tasks**:
+- [ ] Add `_encode_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts-encode")`
+- [ ] Refactor streaming endpoint to release semaphore before encoding
+- [ ] Use `asyncio.gather()` to overlap encode N with synthesize N+1
+- [ ] Test: verify no race conditions when sentences encode out of order
+
+---
+
+## A10. jemalloc Memory Allocator
+
+**What**: Python's default `malloc` (ptmalloc2 on Linux) has poor behavior for long-running processes with many small allocations — it fragments memory and holds fragmented pages rather than returning them to the OS. `jemalloc` uses size-class segregated free lists and background thread decay, dramatically reducing fragmentation and allocation latency.
+
+**This matters here**: PyTorch + numpy do many small allocations per request. Over hours of uptime, ptmalloc2 causes RSS memory to grow 2–3× beyond actual usage.
+
+```dockerfile
+# In Dockerfile, add:
+RUN apt-get install -y libjemalloc2
+
+# In Dockerfile CMD or entrypoint:
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+ENV MALLOC_CONF="background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0"
+```
+
+**Gain**: Lower RSS memory, reduced allocation latency (~20% faster for allocation-heavy code), eliminates memory growth over time.
+
+**Tasks**:
+- [ ] Add `libjemalloc2` to Dockerfile apt install
+- [ ] Set `LD_PRELOAD` and `MALLOC_CONF` env vars
+- [ ] Monitor RSS over 24h before/after (`docker stats`)
+
+---
+
+## A11. CPU Affinity — Pin Inference Thread to GPU-Adjacent Cores
+
+**What**: On NUMA systems (multi-socket, or some Ryzen/EPYC configs), CPU cores have different latency to GPU PCIe. Pinning the inference thread to cores on the same NUMA node as the GPU reduces cache coherency traffic and memory latency for CPU↔GPU data transfers.
+
+```bash
+# Find which NUMA node your GPU is on:
+cat /sys/bus/pci/devices/0000:$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -1 | cut -d: -f2-)/numa_node
+
+# Pin container to that node's CPUs:
+# In compose.yaml:
+cpuset: "0-7"  # cores on NUMA node 0 (adjust to your system)
+```
+
+**Or at Python level** using `os.sched_setaffinity()` on the inference thread.
+
+**Tasks**:
+- [ ] Identify GPU NUMA node
+- [ ] Set `cpuset` in compose.yaml to GPU-adjacent cores
+- [ ] Benchmark: p50/p99 inference latency before/after
+
+---
+
+## A12. Transparent Huge Pages for Model Weights
+
+**What**: The 0.6B model weights occupy ~2.4GB in GPU memory, but their corresponding CPU-side tensors (during load) use thousands of 4KB pages. Each page is a TLB entry. Transparent Huge Pages (THP) coalesces these into 2MB pages, reducing TLB pressure during model loading and weight initialization.
+
+```bash
+# Enable THP (on host):
+echo always > /sys/kernel/mm/transparent_hugepage/enabled
+echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag
+
+# Or per-process via madvise (PyTorch does this automatically with MADV_HUGEPAGE in newer versions)
+```
+
+**Gain**: Faster model load time (5–15%), lower CPU overhead during warmup. Negligible during inference (weights are on GPU).
+
+**Tasks**:
+- [ ] Check current THP setting: `cat /sys/kernel/mm/transparent_hugepage/enabled`
+- [ ] Enable on host startup (add to `/etc/rc.local` or systemd unit)
+- [ ] Measure: model load time before/after
+
+---
+
+## A13. WebSockets — True Bidirectional Streaming
+
+**What**: SSE (item #1) is server-push only over HTTP/1.1. WebSockets provide full-duplex: the client can send new text mid-stream, cancel generation, or send parameters. For a real-time voice assistant, WebSockets are the correct protocol — the client sends text and receives a binary audio stream back on the same persistent connection.
+
+**Latency advantage**: WebSocket connection is established once (handshake ~1 round-trip). Subsequent messages have no HTTP overhead. SSE requires a new connection per request in some clients.
+
+**Implementation with FastAPI**:
+```python
+from fastapi import WebSocket
+
+@app.websocket("/v1/audio/speech/ws")
+async def synthesize_ws(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            text = data.get("input", "")
+            voice = resolve_voice(data.get("voice"))
+            language = data.get("language") or detect_language(text)
+
+            for sentence in split_sentences(text):
+                audio_np = await synthesize_sentence(sentence, voice, language)
+                audio_bytes = to_pcm(audio_np)  # raw PCM, no headers
+                await websocket.send_bytes(audio_bytes)
+
+            await websocket.send_json({"event": "done"})
+    except WebSocketDisconnect:
+        pass
+```
+
+**Tasks**:
+- [ ] Add `/v1/audio/speech/ws` WebSocket endpoint
+- [ ] Send binary PCM frames per sentence chunk
+- [ ] Send JSON control frames (`{"event": "done"}`, `{"event": "error", "detail": "..."}`)
+- [ ] Document protocol: connection, send JSON, receive binary frames + done event
+
+---
+
+## A14. HTTP/2 — Multiplexed Concurrent Requests
+
+**What**: HTTP/1.1 (current) opens a new TCP connection per request (or reuses with keep-alive, but serializes). HTTP/2 multiplexes multiple concurrent requests over a single TCP connection, eliminating connection setup overhead for burst traffic.
+
+**For uvicorn**: Switch from `httptools` (HTTP/1.1) to `h2` (HTTP/2):
+
+```yaml
+# In compose.yaml command, replace:
+--http httptools
+# with:
+--http h2
+```
+
+**Note**: HTTP/2 requires TLS in browsers but works without TLS for programmatic clients (h2c = cleartext HTTP/2). OpenAI SDK supports h2c.
+
+**Tasks**:
+- [ ] Add `h2` package to Dockerfile: `pip install h2`
+- [ ] Change `--http httptools` to `--http h2` in compose.yaml
+- [ ] Test with `curl --http2 ...` and verify connection reuse
+- [ ] Verify OpenAI Python SDK works with h2c
+
+---
+
+## A15. Unix Domain Sockets — Zero TCP Overhead (Same-Host Clients)
+
+**What**: If the TTS client (e.g., your voice assistant, LLM server) runs on the same host as the TTS server, TCP loopback adds unnecessary overhead: TCP handshake, kernel TCP stack, socket buffer copies. Unix Domain Sockets (UDS) bypass all of this — data goes directly kernel↔kernel.
+
+**Gain**: ~0.1–0.5ms per request. More importantly, eliminates jitter from TCP retransmits on loopback (rare but non-zero).
+
+```yaml
+# compose.yaml: bind to UDS instead of/in addition to TCP
+command: uvicorn server:app --uds /tmp/qwen3-tts.sock --loop uvloop
+
+volumes:
+  - /tmp/qwen3-tts.sock:/tmp/qwen3-tts.sock  # share with client container
+```
+
+```python
+# Client-side (httpx):
+import httpx
+transport = httpx.AsyncHTTPTransport(uds="/tmp/qwen3-tts.sock")
+async with httpx.AsyncClient(transport=transport, base_url="http://tts") as client:
+    response = await client.post("/v1/audio/speech", json={...})
+```
+
+**Tasks**:
+- [ ] Add `--uds /tmp/qwen3-tts.sock` to uvicorn command
+- [ ] Keep TCP port as fallback for external clients
+- [ ] Share socket via Docker volume if client is in another container
+- [ ] Document UDS client usage
+
+---
+
+## A16. Always-On Mode (Disable Idle Unload for Dedicated GPU)
+
+**What**: The idle watchdog (unload after 120s) makes sense for a shared GPU serving multiple models. For a dedicated TTS server with guaranteed GPU allocation, it adds unnecessary reload latency (~2–5s) on the next request after idle. Disabling it keeps the model always resident in VRAM.
+
+```yaml
+# compose.yaml:
+environment:
+  IDLE_TIMEOUT: "0"  # 0 = disabled
+```
+
+**Tradeoff**: VRAM is held permanently (~2.4GB for 0.6B). Only valid if nothing else needs that VRAM.
+
+**Tasks**:
+- [ ] Document `IDLE_TIMEOUT=0` in README as "dedicated GPU" mode
+- [ ] Add to compose.yaml as commented option
+
+---
+
+## A17. Eager Model Load at Startup
+
+**What**: Currently the model loads on the first request. The first request after a cold start pays a ~10–15s load penalty. For production servers where latency of the first request matters, load at startup.
+
+```python
+# Replace @app.on_event("startup") with:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(_idle_watchdog())
+    if os.getenv("PRELOAD_MODEL", "0") == "1":
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_infer_executor, _load_model_sync)
+    yield
+```
+
+```yaml
+# compose.yaml:
+environment:
+  PRELOAD_MODEL: "1"
+```
+
+**Tasks**:
+- [ ] Add `PRELOAD_MODEL` env var
+- [ ] Load in lifespan startup if set
+- [ ] Increase `start_period` in Docker healthcheck to 60s (model load time)
+
+---
+
+## A18 & A19. Docker Host Networking & IPC
+
+**What**: Two Docker flags that reduce container networking overhead:
+
+```yaml
+# compose.yaml additions:
+services:
+  qwen3-tts:
+    ipc: host           # Share host IPC namespace — faster CUDA IPC between processes
+    network_mode: host  # Bypass Docker bridge NAT — use host network stack directly
+    # REMOVE ports: mapping when using network_mode: host
+```
+
+- `--ipc=host`: CUDA uses shared memory IPC for some operations. Container IPC namespace isolation adds overhead. `ipc: host` eliminates this.
+- `--network=host`: Removes Docker's userspace NAT for the bridge network. Reduces per-packet overhead by ~0.1–0.2ms. Only safe on trusted single-host deployments.
+
+**Tradeoff**: `network_mode: host` removes port isolation. Suitable for private/internal deployments, not public-facing servers.
+
+**Tasks**:
+- [ ] Add `ipc: host` to compose.yaml (always safe)
+- [ ] Add `network_mode: host` as optional commented config for private deployments
+- [ ] Remove `ports:` mapping when `network_mode: host` is active
+
+---
+
+## A20. Per-Request Latency Breakdown
+
+**What**: Currently there's no way to know where time is being spent: model load? queue wait? inference? audio encoding? network transfer? Without measurements, optimization is guesswork.
+
+Add timing instrumentation at each stage:
+
+```python
+import time
+
+@app.post("/v1/audio/speech")
+async def synthesize_speech(request: TTSRequest):
+    t0 = time.perf_counter()
+    await _ensure_model_loaded()
+    t_loaded = time.perf_counter()
+
+    async with _infer_semaphore:
+        t_queued = time.perf_counter()
+        wavs, sr = await asyncio.wait_for(...)
+    t_inferred = time.perf_counter()
+
+    audio_bytes, content_type = convert_audio_format(...)
+    t_encoded = time.perf_counter()
+
+    logger.info("synthesis_complete",
+        load_ms=round((t_loaded - t0) * 1000),
+        queue_ms=round((t_queued - t_loaded) * 1000),
+        infer_ms=round((t_inferred - t_queued) * 1000),
+        encode_ms=round((t_encoded - t_inferred) * 1000),
+        total_ms=round((t_encoded - t0) * 1000),
+        chars=len(request.input),
+        voice=speaker,
+    )
+```
+
+**Add to response headers** so clients can see breakdown:
+```
+X-Latency-Infer-Ms: 423
+X-Latency-Encode-Ms: 12
+X-Latency-Total-Ms: 441
+```
+
+**Tasks**:
+- [ ] Add `time.perf_counter()` checkpoints at each stage
+- [ ] Log breakdown as structured JSON per request
+- [ ] Add latency headers to response
+- [ ] Build histogram in Prometheus (infer_ms, encode_ms per voice/length bucket)
+
+---
+
+## Updated Implementation Order (Combined Roadmap)
+
+```
+Week 1 — Immediate wins (all ≤1 hour each):
+  A1: Adaptive max_new_tokens       ← single line change, massive impact
+  A2: TF32 mode                     ← two lines
+  A3: GPU persistence mode          ← one nvidia-smi command
+  A6: VAD silence trimming          ← ~20 lines, pure numpy
+  A20: Per-request latency logging  ← measure everything before optimizing further
+
+Week 1 — Streaming:
+  #1: Sentence-chunked SSE streaming
+  #2: Raw PCM endpoint
+
+Week 2 — Inference flags:
+  #3: flash_attention_2
+  #4: torch.compile
+
+Week 2 — Caching & Audio:
+  A5: Audio output cache (LRU)
+  A10: jemalloc
+  A7: Opus codec
+  A4: GPU clock locking
+
+Week 3 — Quality Polish:
+  #9: Text normalization
+  #7: Voice prompt cache
+  #11: fasttext language detection
+  #10: pyrubberband speed
+
+Week 3 — Protocol:
+  A13: WebSockets endpoint
+  A14: HTTP/2
+  A15: Unix domain sockets
+
+Week 4 — System Tuning:
+  A8: GPU-accelerated audio (torchaudio)
+  A9: Async encode pipeline
+  A11: CPU affinity
+  A12: Huge pages
+  A18: ipc: host in Docker
+
+Week 5 — Lifecycle & Observability:
+  A16: Always-on mode documentation
+  A17: Eager preload option
+  #16: Prometheus metrics
+  #17: Structured JSON logging
+  #14: Pin dependency versions
+```
