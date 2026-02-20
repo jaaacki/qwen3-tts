@@ -78,13 +78,6 @@ class TTSRequest(BaseModel):
     instruct: Optional[str] = None
 
 
-class VoiceCloneRequest(BaseModel):
-    input: str
-    language: Optional[str] = None
-    ref_text: Optional[str] = None
-    response_format: str = "wav"
-
-
 def _release_gpu_full():
     """Full GPU memory release — only used during model unload."""
     gc.collect()
