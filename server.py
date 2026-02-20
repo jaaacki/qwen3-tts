@@ -153,6 +153,10 @@ VAD_TRIM = os.getenv("VAD_TRIM", "true").lower() in ("true", "1", "yes")
 # Text normalization (expand numbers, currency, abbreviations)
 TEXT_NORMALIZE = os.getenv("TEXT_NORMALIZE", "true").lower() in ("true", "1", "yes")
 
+# Queue depth limit — 503 when exceeded (0 = unlimited)
+MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "5"))
+_queue_depth = 0
+
 # Track last request time
 _last_used = 0.0
 
@@ -401,6 +405,8 @@ async def health():
         "model_loaded": model is not None,
         "model_id": loaded_model_id,
         "cuda": torch.cuda.is_available(),
+        "queue_depth": _queue_depth,
+        "max_queue_depth": MAX_QUEUE_DEPTH,
         "voices": list(VOICE_MAP.keys()),
         "audio_cache_size": len(_audio_cache),
         "audio_cache_max": _AUDIO_CACHE_MAX,
@@ -663,13 +669,25 @@ async def _encode_audio_async(audio_data, sample_rate, output_format):
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
     """OpenAI-compatible TTS endpoint using CustomVoice model."""
+    global _queue_depth
+
     request_id = str(uuid.uuid4())[:8]
     t_start = time.perf_counter()
+
+    # Early rejection when queue is full
+    if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy: {_queue_depth} requests queued. Try again later.",
+            headers={"Retry-After": "5"},
+        )
+
     if not request.input or not request.input.strip():
         raise HTTPException(status_code=400, detail="Input text is required")
 
     speaker = resolve_voice(request.voice)
     text = request.input.strip()
+    _queue_depth += 1
 
     # Fast path: return cached audio without touching the GPU
     cache_key = _audio_cache_key(
@@ -754,6 +772,8 @@ async def synthesize_speech(request: TTSRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+    finally:
+        _queue_depth -= 1
 
 
 @app.post("/v1/audio/speech/stream")
@@ -833,12 +853,23 @@ async def clone_voice(
     response_format: str = Form("wav"),
 ):
     """Voice cloning endpoint - requires a reference audio file."""
+    global _queue_depth
+
     t_start = time.perf_counter()
+
+    if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy: {_queue_depth} requests queued. Try again later.",
+            headers={"Retry-After": "5"},
+        )
+
     await _ensure_model_loaded()
 
     if not input or not input.strip():
         raise HTTPException(status_code=400, detail="Input text is required")
 
+    _queue_depth += 1
     try:
         # Read and cache reference audio
         audio_bytes = await file.read()
@@ -907,6 +938,8 @@ async def clone_voice(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
+    finally:
+        _queue_depth -= 1
 
 
 @app.post("/v1/audio/speech/stream/pcm")
