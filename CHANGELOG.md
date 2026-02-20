@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #34: Pin all dependency versions] — 2026-02-20
+### Added
+- `requirements.txt` with pinned dependency versions for reproducible builds (#34)
+
 ## [Unreleased — Issue #30: Prometheus metrics endpoint] — 2026-02-20
 ### Added
 - Prometheus metrics endpoint (`GET /metrics`) via `prometheus-fastapi-instrumentator` (#30)
