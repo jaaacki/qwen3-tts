@@ -2,9 +2,10 @@
 
 ## [Unreleased — Issue #20: Async audio encode pipeline] — 2026-02-20
 ### Added
-- **Async audio encode pipeline** — dedicated `_encode_executor` (2 CPU threads) for audio encoding, freeing the event loop during format conversion (#20)
+- **Async audio encode pipeline** — dedicated `_encode_executor` (2 CPU threads) for audio encoding, freeing the event loop during format conversion; applied to both `/speech` and `/clone` endpoints (#20)
 - **`_split_sentences` helper** — regex-based sentence splitter for future streaming pipeline overlap (#20)
 - **`_encode_audio_async`** — async wrapper for `convert_audio_format` that runs in CPU thread pool (#20)
+- Note: true pipeline overlap (encode N while synthesizing N+1) requires streaming endpoints from Phase 1 (#3/#4); this PR provides the infrastructure
 
 ## [Unreleased — Issue #19: GPU-accelerated audio with torchaudio] — 2026-02-20
 ### Added

@@ -15,6 +15,7 @@ import re
 import numpy as np
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+import re as _re
 import scipy.signal as scipy_signal
 import logging
 import base64
@@ -836,7 +837,7 @@ async def clone_voice(
 
         audio_data = _trim_silence(audio_data, sr)
 
-        audio_bytes_out, content_type = convert_audio_format(
+        audio_bytes_out, content_type = await _encode_audio_async(
             audio_data, sr, response_format
         )
         t_end = time.perf_counter()
