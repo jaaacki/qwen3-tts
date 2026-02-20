@@ -9,6 +9,7 @@ import os
 import gc
 import asyncio
 import time
+import re
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
@@ -46,6 +47,9 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "120"))
 
 # VAD silence trimming (strip leading/trailing silence from audio)
 VAD_TRIM = os.getenv("VAD_TRIM", "true").lower() in ("true", "1", "yes")
+
+# Text normalization (expand numbers, currency, abbreviations)
+TEXT_NORMALIZE = os.getenv("TEXT_NORMALIZE", "true").lower() in ("true", "1", "yes")
 
 # Track last request time
 _last_used = 0.0
@@ -306,6 +310,35 @@ def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: flo
     return audio[start:end]
 
 
+def _expand_currency(amount: str, unit: str) -> str:
+    """Expand currency amount to words."""
+    parts = amount.split('.')
+    result = f"{parts[0]} {unit}"
+    if len(parts) > 1 and parts[1] != '00':
+        result += f" and {parts[1]} cents"
+    return result
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize text for TTS: expand numbers, currency, abbreviations."""
+    if not TEXT_NORMALIZE:
+        return text
+    # Currency
+    text = re.sub(r'\$(\d+(?:\.\d{2})?)', lambda m: _expand_currency(m.group(1), 'dollars'), text)
+    text = re.sub(r'€(\d+)', lambda m: f"{m.group(1)} euros", text)
+    text = re.sub(r'£(\d+)', lambda m: f"{m.group(1)} pounds", text)
+    # Common abbreviations
+    abbrevs = {'Dr.': 'Doctor', 'Mr.': 'Mister', 'Mrs.': 'Missus', 'Prof.': 'Professor',
+               'Jr.': 'Junior', 'Sr.': 'Senior', 'St.': 'Saint', 'Ave.': 'Avenue',
+               'Blvd.': 'Boulevard', 'Dept.': 'Department', 'Est.': 'Established'}
+    for abbr, expansion in abbrevs.items():
+        text = text.replace(abbr, expansion)
+    # Large numbers with commas: 1,000,000 -> 1000000
+    while re.search(r'(\d),(\d{3})', text):
+        text = re.sub(r'(\d),(\d{3})', r'\1\2', text)
+    return text
+
+
 def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
     with torch.inference_mode():
@@ -345,6 +378,7 @@ async def synthesize_speech(request: TTSRequest):
         language = request.language or detect_language(request.input)
         gen_kwargs = {"max_new_tokens": 2048}
         text = request.input.strip()
+        text = _normalize_text(text)
 
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
@@ -412,6 +446,7 @@ async def clone_voice(
         language = language or detect_language(input)
         gen_kwargs = {"max_new_tokens": 2048}
         text = input.strip()
+        text = _normalize_text(text)
 
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
