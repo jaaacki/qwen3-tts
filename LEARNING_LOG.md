@@ -381,3 +381,12 @@ The async encode pipeline moves audio format conversion (WAV/MP3/FLAC/OGG encodi
 **Related**: Issue #24
 
 Two bugs were caught in review. First, the sentence-splitting regex `(?<=[.!?])\s+` incorrectly splits on abbreviations like "Dr. Smith" or "U.S.A.". The fix uses abbreviation-aware lookbehinds: `(?<!\w\.\w.)(?<![A-Z][a-z]\.)` and adds CJK full-width punctuation (U+3002, U+FF01, U+FF1F) so Chinese/Japanese text with `。！？` gets chunked correctly. Second, float audio values outside [-1.0, 1.0] cause int16 wraparound distortion when multiplied by 32767. The model can occasionally produce values slightly above 1.0. Adding `np.clip(audio_data, -1.0, 1.0)` before conversion prevents this. The existing PCM streaming endpoint already had this clip; the WebSocket endpoint missed it.
+
+---
+
+## Entry 0021 — HTTP/2: TLS requirement and practical benefits
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #25
+
+HTTP/2 requires TLS in practice. While the spec defines h2c (cleartext HTTP/2), browsers and most HTTP clients do not support it. The `h2` package provides the protocol implementation, but uvicorn only negotiates HTTP/2 via ALPN during the TLS handshake. Without TLS certificates, the server runs plain HTTP/1.1 — the `h2` package sits unused but harmless. The practical benefits of HTTP/2 for a TTS server are modest: header compression saves a few bytes per request, and multiplexing allows concurrent requests on one connection. For most TTS workloads (single request, wait for audio, play), HTTP/1.1 is sufficient. The value comes in multi-tenant deployments where many clients connect through a load balancer — fewer TCP connections and faster header processing. The docker-entrypoint.sh appends conditional TLS flags when SSL env vars are set, keeping the ENTRYPOINT pattern from #23 intact.

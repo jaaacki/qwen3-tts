@@ -2,8 +2,9 @@
 
 ## [Unreleased — Issue #25: HTTP/2 support] — 2026-02-20
 ### Added
-- **HTTP/2 support** — `h2` package installed; TLS enabled via `SSL_KEYFILE` and `SSL_CERTFILE` env vars (#25)
-- Conditional TLS in docker-entrypoint.sh — uvicorn adds `--ssl-keyfile`/`--ssl-certfile` only when env vars are set (#25)
+- **HTTP/2 support** — `h2>=4.0.0` package installed; requires TLS certificates (h2c cleartext not widely supported) (#25)
+- **Conditional TLS** — `SSL_KEYFILE` and `SSL_CERTFILE` env vars enable HTTPS + HTTP/2; empty by default (plain HTTP/1.1) (#25)
+- `docker-entrypoint.sh` appends `--ssl-keyfile`/`--ssl-certfile` to uvicorn args only when env vars are set (#25)
 
 ## [Unreleased — Issue #24: WebSocket streaming endpoint] — 2026-02-20
 ### Added
