@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #25: HTTP/2 support] — 2026-02-20
+### Added
+- **HTTP/2 support** — `h2` package installed; TLS enabled via `SSL_KEYFILE` and `SSL_CERTFILE` env vars (#25)
+- Conditional TLS in docker-entrypoint.sh — uvicorn adds `--ssl-keyfile`/`--ssl-certfile` only when env vars are set (#25)
+
 ## [Unreleased — Issue #24: WebSocket streaming endpoint] — 2026-02-20
 ### Added
 - **WebSocket streaming endpoint** — `WS /v1/audio/speech/ws` accepts JSON, streams binary PCM per sentence chunk, sends `{"event": "done"}` on completion (#24)

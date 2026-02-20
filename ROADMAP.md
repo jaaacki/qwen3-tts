@@ -52,7 +52,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [x] #22 Set CPU affinity for inference thread to GPU-adjacent cores
 - [x] #23 Enable transparent huge pages for model weights
 - [x] #24 Add WebSocket streaming endpoint
-- [ ] #25 Enable HTTP/2 support
+- [x] #25 Enable HTTP/2 support
 - [ ] #26 Add Unix domain socket support for same-host clients
 - [x] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)
 - [x] #28 Add eager model preload on startup (`PRELOAD_MODEL` env var)

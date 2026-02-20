@@ -175,6 +175,8 @@ Environment variables in `compose.yaml`:
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of on first request |
 | `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics at `GET /metrics` |
 | `INFERENCE_CPU_CORES` | *(empty)* | Pin to specific CPU cores (e.g., `0-7`). Empty = no pinning |
+| `SSL_KEYFILE` | *(empty)* | Path to TLS private key (enables HTTP/2) |
+| `SSL_CERTFILE` | *(empty)* | Path to TLS certificate (enables HTTP/2) |
 
 The model cache is persisted to `./models` via volume mount.
 
