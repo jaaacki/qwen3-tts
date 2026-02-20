@@ -91,6 +91,26 @@ curl -X POST http://localhost:8101/v1/audio/speech/clone \
 | `language` | string | *auto-detect* | Language override |
 | `response_format` | string | `wav` | Output format |
 
+### `POST /v1/audio/speech/stream/pcm`
+
+Stream speech as raw PCM audio. Text is split into sentences and each sentence is synthesized and streamed as raw int16 bytes. Use the response headers to configure your audio player.
+
+```bash
+curl -X POST http://localhost:8101/v1/audio/speech/stream/pcm \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hello, world! This is streaming PCM audio.", "voice": "vivian"}' \
+  -o speech.pcm
+# Play with: ffplay -f s16le -ar 24000 -ac 1 speech.pcm
+```
+
+| Header | Value | Description |
+|--------|-------|-------------|
+| `X-PCM-Sample-Rate` | `24000` | Sample rate in Hz |
+| `X-PCM-Bit-Depth` | `16` | Bits per sample (signed int16) |
+| `X-PCM-Channels` | `1` | Mono audio |
+
+Request body parameters are the same as `/v1/audio/speech`.
+
 ### `GET /health`
 
 Returns service status, model info, CUDA availability, and available voices.

@@ -556,6 +556,70 @@ async def clone_voice(
         raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
 
 
+@app.post("/v1/audio/speech/stream/pcm")
+async def synthesize_speech_stream_pcm(request: TTSRequest):
+    """Raw PCM streaming TTS endpoint — no SSE framing, no base64.
+
+    Splits text into sentences and streams each as raw int16 PCM bytes.
+    Headers report the audio format: 24000 Hz, 16-bit, mono.
+    """
+    global _last_used
+    await _ensure_model_loaded()
+
+    if not request.input or not request.input.strip():
+        raise HTTPException(status_code=400, detail="Input text is required")
+
+    speaker = resolve_voice(request.voice)
+    language = request.language or detect_language(request.input)
+    text = request.input.strip()
+    sentences = _split_sentences(text)
+    if not sentences:
+        raise HTTPException(status_code=400, detail="No sentences found in input")
+
+    async def pcm_generator():
+        global _last_used
+        for sentence in sentences:
+            gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+            loop = asyncio.get_running_loop()
+            try:
+                async with _infer_semaphore:
+                    wavs, sr = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            _infer_executor,
+                            lambda s=sentence: _do_synthesize(
+                                s, language, speaker, gen_kwargs
+                            ),
+                        ),
+                        timeout=REQUEST_TIMEOUT,
+                    )
+                _last_used = time.time()
+                audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
+                if audio_data.ndim > 1:
+                    audio_data = audio_data.squeeze()
+                if request.speed != 1.0:
+                    new_length = int(len(audio_data) / request.speed)
+                    if new_length > 0:
+                        audio_data = scipy_signal.resample(audio_data, new_length)
+                pcm_data = np.clip(audio_data, -1.0, 1.0)
+                pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
+                yield pcm_bytes
+            except asyncio.TimeoutError:
+                break
+            except Exception:
+                break
+
+    return StreamingResponse(
+        pcm_generator(),
+        media_type="application/octet-stream",
+        headers={
+            "X-PCM-Sample-Rate": "24000",
+            "X-PCM-Bit-Depth": "16",
+            "X-PCM-Channels": "1",
+            "Content-Disposition": 'attachment; filename="speech.pcm"',
+        },
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
