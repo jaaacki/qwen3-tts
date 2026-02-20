@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #18: Opus codec support] — 2026-02-20
+### Added
+- **Opus codec support** — `response_format=opus` via pydub/ffmpeg libopus at 32kbps; 2.5ms encode latency vs ~50ms for MP3 (#18)
+- **`libopus-dev`** added to Dockerfile for Opus encoding support (use `libopus0` in multi-stage builds) (#18)
+
 ## [Unreleased — Issue #23: Transparent huge pages] — 2026-02-20
 ### Added
 - **Transparent huge pages** — `docker-entrypoint.sh` attempts to enable THP madvise mode at container startup; reduces TLB pressure for model weights (#23)
