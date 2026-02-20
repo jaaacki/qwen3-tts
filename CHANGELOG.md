@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #16: Pre-allocate GPU memory pool] — 2026-02-20
+### Added
+- GPU memory pool pre-warming after model warmup — allocates and frees a 128 MB dummy tensor to pre-reserve a contiguous CUDA memory block, reducing first-request allocation jitter (#16)
+- `max_split_size_mb:512` added to `PYTORCH_CUDA_ALLOC_CONF` in Dockerfile to reduce memory fragmentation from large allocations
+
 ## [Unreleased — Issue #15: Add voice prompt cache for /clone endpoint] — 2026-02-20
 ### Added
 - Voice prompt cache for `/clone` endpoint — caches processed reference audio by SHA-256 content hash (#15)

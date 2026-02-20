@@ -472,3 +472,45 @@ class TestCacheKeyHashing:
             _get_cached_ref_audio(wav2)
         assert len(server._voice_cache) == 1
         assert server._voice_cache_hits == 1
+
+
+# --- Issue #16: GPU memory pool pre-allocation tests ---
+
+class TestGpuPoolPreAllocation:
+    """Verify GPU memory pool pre-warming code exists in _load_model_sync."""
+
+    def test_load_model_contains_pool_prewarm(self):
+        import inspect
+        source = inspect.getsource(server._load_model_sync)
+        assert "Pre-warming CUDA memory pool" in source
+        assert "torch.empty" in source
+        assert "dtype=torch.bfloat16" in source
+
+    def test_dummy_tensor_size_is_128mb(self):
+        import inspect
+        source = inspect.getsource(server._load_model_sync)
+        assert "64 * 1024 * 1024" in source
+
+    def test_pool_prewarm_has_exception_handling(self):
+        import inspect
+        source = inspect.getsource(server._load_model_sync)
+        idx = source.find("Pre-warming CUDA memory pool")
+        assert idx > 0
+        section = source[idx - 200:idx + 500]
+        assert "try:" in section
+        assert "except Exception" in section
+
+    def test_pool_prewarm_after_warmup(self):
+        import inspect
+        source = inspect.getsource(server._load_model_sync)
+        warmup_idx = source.find("Warming up GPU with multi-length synthesis")
+        pool_idx = source.find("Pre-warming CUDA memory pool")
+        assert warmup_idx > 0
+        assert pool_idx > 0
+        assert pool_idx > warmup_idx
+
+    def test_dummy_tensor_is_deleted(self):
+        import inspect
+        source = inspect.getsource(server._load_model_sync)
+        pool_section = source[source.find("Pre-warming CUDA memory pool"):]
+        assert "del dummy" in pool_section

@@ -34,7 +34,7 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 - [x] #13 Replace Unicode language heuristic with fasttext detection
 - [x] #14 Replace scipy speed adjustment with pitch-preserving pyrubberband
 - [x] #15 Add voice prompt cache for `/clone` endpoint
-- [ ] #16 Pre-allocate GPU memory pool to reduce allocation jitter
+- [x] #16 Pre-allocate GPU memory pool to reduce allocation jitter
 
 ---
 
