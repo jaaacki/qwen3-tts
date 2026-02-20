@@ -16,7 +16,7 @@ ENV MKL_NUM_THREADS=2
 
 # Install system dependencies (sox needed by qwen-tts audio pipeline)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git libsndfile1 ffmpeg sox \
+    git libsndfile1 ffmpeg sox rubberband-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Install python dependencies
@@ -33,7 +33,8 @@ RUN pip install --no-cache-dir \
     httptools \
     orjson \
     flash-attn \
-    fasttext-langdetect
+    fasttext-langdetect \
+    pyrubberband
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
