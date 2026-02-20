@@ -354,3 +354,12 @@ THP `madvise` mode is chosen over `always` because `always` can cause latency sp
 **Related**: Issue #18
 
 Opus at 32kbps is near-transparent quality for mono speech. The codec was designed specifically for speech and handles it well at low bitrates. We chose 32kbps over the original 64kbps spec because: (1) doubling the bitrate provides no perceptible quality improvement for single-speaker TTS audio, (2) lower bitrate halves bandwidth for streaming use cases, and (3) Opus at 32kbps still comfortably exceeds the quality of telephone-grade audio (8kbps G.711). The encoding path goes through a WAV intermediate via pydub (same as the existing MP3 path), which adds ~20ms overhead. A future optimization could pipe raw PCM directly to ffmpeg's Opus encoder, bypassing the WAV round-trip. The Dockerfile installs `libopus-dev` for build-time compilation support; multi-stage builds should use `libopus0` in the runtime stage to avoid shipping unnecessary header files.
+
+---
+
+## Entry 0018 — torchaudio: GPU-accelerated audio processing
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: Issue #19
+
+The torchaudio integration replaces soundfile for WAV encoding and scipy for speed-adjustment resampling. The key insight is that torchaudio's `resample()` operates on CUDA tensors, keeping the audio data on GPU and avoiding a CPU round-trip. On Ampere+ GPUs, the polyphase resampling kernel runs significantly faster than scipy's CPU-bound FFT-based resample. The implementation moves the audio tensor to CUDA before resampling and back to CPU only for the final encoding step. On CPU-only hosts, torchaudio still runs on CPU (faster than scipy due to optimized C++ kernels) with a graceful fallback to scipy if torchaudio is not installed. Important caveat: `torchaudio.functional.resample()` changes sample rate, which changes both duration AND pitch — identical behavior to scipy. It is NOT pitch-preserving. Issue #14 (pyrubberband) is the pitch-preserving solution. The base PyTorch Docker image may already include torchaudio; the Dockerfile pip install is a safeguard but could cause version mismatches — verify inside the container.
