@@ -51,7 +51,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [x] #21 Add jemalloc memory allocator via `LD_PRELOAD`
 - [x] #22 Set CPU affinity for inference thread to GPU-adjacent cores
 - [x] #23 Enable transparent huge pages for model weights
-- [ ] #24 Add WebSocket streaming endpoint
+- [x] #24 Add WebSocket streaming endpoint
 - [ ] #25 Enable HTTP/2 support
 - [ ] #26 Add Unix domain socket support for same-host clients
 - [x] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)

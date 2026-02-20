@@ -120,6 +120,40 @@ curl -X POST http://localhost:8101/v1/audio/speech/stream/pcm \
 | `X-PCM-Channels` | `1` | Mono audio |
 
 Request body parameters are the same as `/v1/audio/speech`.
+
+### `WS /v1/audio/speech/ws`
+
+WebSocket endpoint for real-time streaming. Send JSON messages, receive binary PCM frames per sentence.
+
+```python
+import asyncio
+import websockets
+import json
+
+async def stream_tts():
+    async with websockets.connect("ws://localhost:8101/v1/audio/speech/ws") as ws:
+        await ws.send(json.dumps({"input": "Hello world. How are you?", "voice": "vivian"}))
+        while True:
+            msg = await ws.recv()
+            if isinstance(msg, str):
+                data = json.loads(msg)
+                if data.get("event") == "done":
+                    break
+            else:
+                # Binary PCM data (16-bit signed, 24kHz, mono)
+                process_audio(msg)
+
+asyncio.run(stream_tts())
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `input` | string | *required* | Text to synthesize |
+| `voice` | string | `vivian` | Voice name or OpenAI alias |
+| `language` | string | *auto-detect* | Language override |
+| `speed` | float | `1.0` | Playback speed multiplier |
+
+
 ### `GET /health`
 
 Returns service status, model info, CUDA availability, available voices, and cache stats (`audio_cache_size`, `audio_cache_max`).
