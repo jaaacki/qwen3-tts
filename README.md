@@ -50,6 +50,27 @@ curl -X POST http://localhost:8101/v1/audio/speech \
 | `speed` | float | `1.0` | Playback speed multiplier |
 | `language` | string | *auto-detect* | Language override |
 
+
+### `POST /v1/audio/speech/stream`
+
+Stream speech synthesis via Server-Sent Events. Each sentence is synthesized independently and streamed as base64-encoded raw PCM audio (signed 16-bit, 24 kHz, mono).
+
+```bash
+curl -N -X POST http://localhost:8101/v1/audio/speech/stream \\
+  -H "Content-Type: application/json" \\
+  -d '{"input": "First sentence. Second sentence.", "voice": "vivian"}'
+```
+
+Each SSE event contains base64-encoded PCM data. The stream ends with `data: [DONE]`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `input` | string | *required* | Text to synthesize |
+| `voice` | string | `vivian` | Voice name or OpenAI alias |
+| `speed` | float | `1.0` | Playback speed multiplier |
+| `language` | string | *auto-detect* | Language override |
+| `instruct` | string | *optional* | Style/instruction control |
+
 ### `POST /v1/audio/speech/clone`
 
 Generate speech using a cloned voice from a reference audio file.

@@ -12,7 +12,7 @@ Before optimizing anything, we instrument. Then we remove the biggest bottleneck
 
 - [x] #1 Add per-request latency breakdown logging
 - [x] #2 Add adaptive `max_new_tokens` scaling with text length
-- [ ] #3 Add sentence-chunked SSE streaming endpoint
+- [x] #3 Add sentence-chunked SSE streaming endpoint
 - [ ] #4 Add raw PCM streaming endpoint
 
 ---

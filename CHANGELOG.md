@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased — Issue #3: Add sentence-chunked SSE streaming] — 2026-02-20
+### Added
+- Sentence-chunked SSE streaming endpoint `POST /v1/audio/speech/stream` (#3)
+  - Splits input into sentences with abbreviation-aware regex
+  - Streams base64-encoded raw PCM (int16, 24kHz) via Server-Sent Events
+  - Sends `data: [DONE]` on completion, `data: [ERROR] message` on failure
+  - Updates `_last_used` per chunk to prevent idle unload during streaming
+
 ## [Unreleased — Issue #2: Add adaptive max_new_tokens scaling] — 2026-02-20
 ### Changed
 - Replace hardcoded `max_new_tokens: 2048` with adaptive scaling based on input text length (#2)
