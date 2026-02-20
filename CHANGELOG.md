@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #35: Multi-stage Docker build] — 2026-02-20
+### Changed
+- Dockerfile converted to multi-stage build — builder stage installs deps, runtime stage ships only packages and runtime libs (no git, no build tools) (#35)
+
 ## [Unreleased — Issue #34: Pin all dependency versions] — 2026-02-20
 ### Added
 - `requirements.txt` with pinned dependency versions for reproducible builds (#34)
