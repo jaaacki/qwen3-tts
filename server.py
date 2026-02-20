@@ -58,6 +58,13 @@ try:
 except ImportError:
     _PydubAudioSegment = None
 
+try:
+    import torchaudio
+    import torchaudio.functional as torchaudio_F
+    _TORCHAUDIO = True
+except ImportError:
+    _TORCHAUDIO = False
+
 # Enable cudnn autotuner — finds fastest convolution algorithms for the GPU
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
@@ -382,7 +389,11 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
     buffer = io.BytesIO()
 
     if output_format in ("wav", "wave"):
-        sf.write(buffer, audio_data, sample_rate, format="WAV")
+        if _TORCHAUDIO:
+            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)
+            torchaudio.save(buffer, audio_tensor, sample_rate, format="wav")
+        else:
+            sf.write(buffer, audio_data, sample_rate, format="WAV")
         content_type = "audio/wav"
     elif output_format == "mp3":
         if _PydubAudioSegment is not None:
