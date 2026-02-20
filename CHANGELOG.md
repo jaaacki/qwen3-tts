@@ -1,6 +1,13 @@
 # Changelog
 
-## [0.3.3] — 2026-02-20
+## [Unreleased — Issue #6: Enable GPU persistence mode] — 2026-02-20
+### Added
+- `docker-entrypoint.sh` — GPU persistence mode (`nvidia-smi -pm 1`) runs at container startup, eliminating 200-500ms GPU cold-start penalty (#6)
+
+### Changed
+- Dockerfile now uses ENTRYPOINT for GPU tuning before uvicorn starts
+
+## [Unreleased — Issue #5: Enable TF32 matmul mode] — 2026-02-20
 ### Changed
 - Enable TF32 matmul and cuDNN TF32 on Ampere+ GPUs for ~3x faster matrix operations (#5)
 

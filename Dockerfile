@@ -33,10 +33,12 @@ RUN pip install --no-cache-dir \
     httptools \
     orjson
 
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
 
 EXPOSE 8000
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "server:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
