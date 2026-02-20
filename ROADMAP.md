@@ -29,11 +29,11 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 - [x] #8 Switch `attn_implementation` to `flash_attention_2`
 - [x] #9 Enable `torch.compile` on model forward pass
 - [x] #10 Deepen GPU warmup with multi-length synthesis calls
-- [ ] #11 Add VAD silence trimming (strip leading/trailing silence)
-- [ ] #12 Add text normalization for numbers, currency, abbreviations
+- [x] #11 Add VAD silence trimming (strip leading/trailing silence)
+- [x] #12 Add text normalization for numbers, currency, abbreviations
 - [x] #13 Replace Unicode language heuristic with fasttext detection
 - [x] #14 Replace scipy speed adjustment with pitch-preserving pyrubberband
-- [ ] #15 Add voice prompt cache for `/clone` endpoint
+- [x] #15 Add voice prompt cache for `/clone` endpoint
 - [ ] #16 Pre-allocate GPU memory pool to reduce allocation jitter
 
 ---

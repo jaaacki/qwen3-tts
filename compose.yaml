@@ -14,6 +14,7 @@ services:
       - TORCH_COMPILE=true
       - VAD_TRIM=true
       - TEXT_NORMALIZE=true
+      - VOICE_CACHE_MAX=32
     volumes:
       - ./models:/root/.cache/huggingface
     shm_size: "1g"

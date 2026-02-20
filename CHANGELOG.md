@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased — Issue #15: Add voice prompt cache for /clone endpoint] — 2026-02-20
+### Added
+- Voice prompt cache for `/clone` endpoint — caches processed reference audio by SHA-256 content hash (#15)
+- `VOICE_CACHE_MAX` env var (default: 32) — controls LRU cache capacity; set to 0 to disable
+- Cache stats exposed in `/health` endpoint: `voice_cache_size`, `voice_cache_max`, `voice_cache_hits`
+
 ## [Unreleased — Issue #14: Replace scipy speed adjustment with pyrubberband] — 2026-02-20
 ### Changed
 - `_adjust_speed()` now uses `pyrubberband.time_stretch()` for pitch-preserving speed changes, falling back to `scipy.signal.resample` when pyrubberband is unavailable (#14)

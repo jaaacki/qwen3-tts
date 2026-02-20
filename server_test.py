@@ -1,8 +1,11 @@
 """Tests for server.py - Phase 2 Speed & Quality features."""
 import sys
+import io
+import hashlib
 import pytest
 import torch
 import numpy as np
+import soundfile as sf
 from unittest.mock import patch, MagicMock
 
 # Mock heavy imports before importing server
@@ -15,6 +18,7 @@ with patch.dict("sys.modules", _mock_modules):
         _trim_silence, _normalize_text, _expand_currency,
         _detect_language_unicode, _get_langdetect, detect_language,
         _adjust_speed, resolve_voice, _LANG_MAP,
+        _get_cached_ref_audio,
     )
     import server
 
@@ -328,3 +332,143 @@ class TestResolveVoice:
         assert resolve_voice("alloy") == "ryan"
     def test_case_insensitive(self):
         assert resolve_voice("VIVIAN") == "vivian"
+
+
+# --- Issue #15: Voice prompt cache tests ---
+
+def _make_wav_bytes(samples=None, sr=24000, channels=1):
+    """Helper to create valid WAV bytes for testing."""
+    if samples is None:
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+    if channels > 1:
+        samples = np.column_stack([samples] * channels)
+    buf = io.BytesIO()
+    sf.write(buf, samples, sr, format="WAV")
+    return buf.getvalue(), samples, sr
+
+
+class TestVoiceCacheBasics:
+    def setup_method(self):
+        server._voice_cache.clear()
+        server._voice_cache_hits = 0
+
+    def test_first_call_populates_cache(self):
+        wav_bytes, _, sr = _make_wav_bytes()
+        with patch.object(server, "VOICE_CACHE_MAX", 32):
+            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
+        assert result_sr == sr
+        assert len(server._voice_cache) == 1
+        assert isinstance(result_data, np.ndarray)
+
+    def test_second_call_returns_cached(self):
+        wav_bytes, _, _ = _make_wav_bytes()
+        with patch.object(server, "VOICE_CACHE_MAX", 32):
+            first_data, first_sr = _get_cached_ref_audio(wav_bytes)
+            hits_before = server._voice_cache_hits
+            second_data, second_sr = _get_cached_ref_audio(wav_bytes)
+        assert server._voice_cache_hits == hits_before + 1
+        np.testing.assert_array_equal(first_data, second_data)
+        assert first_sr == second_sr
+
+    def test_different_audio_gets_different_cache_entries(self):
+        wav1, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * 0.1)
+        wav2, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * 0.2)
+        with patch.object(server, "VOICE_CACHE_MAX", 32):
+            _get_cached_ref_audio(wav1)
+            _get_cached_ref_audio(wav2)
+        assert len(server._voice_cache) == 2
+
+
+class TestVoiceCacheLRU:
+    def setup_method(self):
+        server._voice_cache.clear()
+        server._voice_cache_hits = 0
+
+    def test_evicts_oldest_when_full(self):
+        wavs = []
+        for i in range(4):
+            w, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * (i + 1) * 0.1)
+            wavs.append(w)
+        with patch.object(server, "VOICE_CACHE_MAX", 2):
+            for w in wavs:
+                _get_cached_ref_audio(w)
+        assert len(server._voice_cache) == 2
+        # First two should have been evicted
+        key0 = hashlib.sha256(wavs[0]).hexdigest()
+        key1 = hashlib.sha256(wavs[1]).hexdigest()
+        assert key0 not in server._voice_cache
+        assert key1 not in server._voice_cache
+
+    def test_access_promotes_entry(self):
+        wavs = []
+        for i in range(3):
+            w, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * (i + 1) * 0.1)
+            wavs.append(w)
+        with patch.object(server, "VOICE_CACHE_MAX", 2):
+            _get_cached_ref_audio(wavs[0])  # cache: [0]
+            _get_cached_ref_audio(wavs[1])  # cache: [0, 1]
+            _get_cached_ref_audio(wavs[0])  # hit, promotes 0 -> cache: [1, 0]
+            _get_cached_ref_audio(wavs[2])  # evicts 1 -> cache: [0, 2]
+        key0 = hashlib.sha256(wavs[0]).hexdigest()
+        key1 = hashlib.sha256(wavs[1]).hexdigest()
+        key2 = hashlib.sha256(wavs[2]).hexdigest()
+        assert key0 in server._voice_cache
+        assert key1 not in server._voice_cache
+        assert key2 in server._voice_cache
+
+
+class TestVoiceCacheDisabled:
+    def setup_method(self):
+        server._voice_cache.clear()
+        server._voice_cache_hits = 0
+
+    def test_cache_disabled_skips_caching(self):
+        wav_bytes, _, _ = _make_wav_bytes()
+        with patch.object(server, "VOICE_CACHE_MAX", 0):
+            _get_cached_ref_audio(wav_bytes)
+        assert len(server._voice_cache) == 0
+
+    def test_cache_disabled_still_returns_valid_audio(self):
+        wav_bytes, _, sr = _make_wav_bytes()
+        with patch.object(server, "VOICE_CACHE_MAX", 0):
+            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
+        assert result_sr == sr
+        assert isinstance(result_data, np.ndarray)
+        assert len(result_data) > 0
+
+
+class TestStereoToMono:
+    def setup_method(self):
+        server._voice_cache.clear()
+        server._voice_cache_hits = 0
+
+    def test_stereo_converted_to_mono(self):
+        mono_samples = np.random.randn(1000).astype(np.float32) * 0.1
+        wav_bytes, _, sr = _make_wav_bytes(mono_samples, channels=2)
+        with patch.object(server, "VOICE_CACHE_MAX", 32):
+            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
+        assert result_data.ndim == 1
+        assert result_sr == sr
+
+    def test_mono_stays_mono(self):
+        wav_bytes, _, sr = _make_wav_bytes()
+        with patch.object(server, "VOICE_CACHE_MAX", 32):
+            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
+        assert result_data.ndim == 1
+
+
+class TestCacheKeyHashing:
+    def setup_method(self):
+        server._voice_cache.clear()
+        server._voice_cache_hits = 0
+
+    def test_same_content_same_key(self):
+        samples = np.ones(1000, dtype=np.float32) * 0.5
+        wav1, _, _ = _make_wav_bytes(samples)
+        wav2, _, _ = _make_wav_bytes(samples)
+        assert wav1 == wav2  # same input -> same bytes
+        with patch.object(server, "VOICE_CACHE_MAX", 32):
+            _get_cached_ref_audio(wav1)
+            _get_cached_ref_audio(wav2)
+        assert len(server._voice_cache) == 1
+        assert server._voice_cache_hits == 1
