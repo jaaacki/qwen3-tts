@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #10: Multi-length GPU warmup] — 2026-02-20
+### Changed
+- GPU warmup now runs 3 synthesis calls at different text lengths (5, 30, 90 chars) to pre-cache more CUDA kernel paths (#10)
+
 ## [Unreleased — Issue #9: Enable torch.compile] — 2026-02-20
 ### Added
 - `torch.compile` on model forward pass with `reduce-overhead` mode for faster inference (#9)
