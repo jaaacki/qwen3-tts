@@ -10,7 +10,7 @@ services:
       - MODEL_ID=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - REQUEST_TIMEOUT=300
-      - IDLE_TIMEOUT=120
+      - IDLE_TIMEOUT=120        # 0 = never unload (always-on mode)
       - AUDIO_CACHE_MAX=256
       - TORCH_COMPILE=true
       - VAD_TRIM=true

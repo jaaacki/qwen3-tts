@@ -288,4 +288,14 @@ The test strategy uses mock-based reimport rather than `if torch.cuda.is_availab
 
 FastAPI deprecated `@app.on_event("startup")` and `@app.on_event("shutdown")` in version 0.93.0. The replacement is the lifespan context manager pattern: `@asynccontextmanager async def lifespan(app)`. The yield point separates startup from shutdown — everything before yield runs at startup, everything after runs at shutdown.
 
-The practical advantage is not just suppressing deprecation warnings. The old pattern had separate startup and shutdown functions with no shared scope. With lifespan, variables from the startup section are naturally in scope during teardown. For our server, the immediate benefit is that model unload now runs on graceful shutdown — ensuring clean VRAM release in shared GPU environments where another container might be waiting for memory.
+The practical advantage is not just suppressing deprecation warnings. The old pattern had separate startup and shutdown functions with no shared scope. If startup allocated a resource (like a background task handle), the shutdown function needed that handle stored in a global or on the app object. With lifespan, variables from the startup section are naturally in scope during teardown:
+
+```python
+@asynccontextmanager
+async def lifespan(app):
+    watchdog_task = asyncio.create_task(_idle_watchdog())  # startup
+    yield
+    watchdog_task.cancel()  # shutdown — same scope, no global needed
+```
+
+For our server, the immediate benefit is that model unload now runs on graceful shutdown. Previously, if the container was stopped with SIGTERM, the model was not explicitly unloaded — the process just died and the GPU driver reclaimed VRAM. With the lifespan teardown, we run `_unload_model_sync()` which calls `gc.collect()` and `torch.cuda.empty_cache()` before exit. This ensures clean VRAM release in shared GPU environments where another container might be waiting for memory.

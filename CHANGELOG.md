@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased — Issue #27: Always-on mode] — 2026-02-20
+### Added
+- Always-on mode documentation — `IDLE_TIMEOUT=0` disables idle unload for dedicated GPU servers (#27)
+
 ## [Unreleased — Issue #33: Migrate @app.on_event to FastAPI lifespan] — 2026-02-20
 ### Changed
 - Migrated from deprecated `@app.on_event("startup")` to FastAPI lifespan context manager (#33)

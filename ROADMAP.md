@@ -54,7 +54,7 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 - [ ] #24 Add WebSocket streaming endpoint
 - [ ] #25 Enable HTTP/2 support
 - [ ] #26 Add Unix domain socket support for same-host clients
-- [ ] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)
+- [x] #27 Add always-on mode (`IDLE_TIMEOUT=0` option, documented)
 - [ ] #28 Add eager model preload on startup (`PRELOAD_MODEL` env var)
 - [ ] #29 Add `ipc:host` to Docker compose for CUDA IPC
 - [ ] #30 Add Prometheus metrics endpoint
