@@ -1,11 +1,8 @@
 # Changelog
 
-## [0.3.8] — 2026-02-20
-### Added
-- `docker-entrypoint.sh` — GPU persistence mode (`nvidia-smi -pm 1`) runs at container startup, eliminating 200-500ms GPU cold-start penalty (#6)
-
+## [Unreleased — Issue #36: remove dead VoiceCloneRequest] — 2026-02-20
 ### Changed
-- Dockerfile now uses ENTRYPOINT for GPU tuning before uvicorn starts
+- Remove unused `VoiceCloneRequest` Pydantic model from `server.py` — the `/clone` endpoint uses `Form()` parameters directly; model was dead code (#36)
 
 ## [Docs] 2026-02-20 — Improvement roadmap and project documentation
 
