@@ -31,7 +31,7 @@ GPU tuning flags come first because they are low-risk and establish a faster bas
 - [x] #10 Deepen GPU warmup with multi-length synthesis calls
 - [ ] #11 Add VAD silence trimming (strip leading/trailing silence)
 - [ ] #12 Add text normalization for numbers, currency, abbreviations
-- [ ] #13 Replace Unicode language heuristic with fasttext detection
+- [x] #13 Replace Unicode language heuristic with fasttext detection
 - [ ] #14 Replace scipy speed adjustment with pitch-preserving pyrubberband
 - [ ] #15 Add voice prompt cache for `/clone` endpoint
 - [ ] #16 Pre-allocate GPU memory pool to reduce allocation jitter

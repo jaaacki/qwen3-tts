@@ -1,4 +1,5 @@
 """Tests for server.py - Phase 2 Speed & Quality features."""
+import sys
 import pytest
 import torch
 import numpy as np
@@ -10,7 +11,11 @@ _mock_modules = {
 }
 
 with patch.dict("sys.modules", _mock_modules):
-    from server import _trim_silence, _normalize_text, _expand_currency, resolve_voice, detect_language
+    from server import (
+        _trim_silence, _normalize_text, _expand_currency,
+        _detect_language_unicode, _get_langdetect, detect_language,
+        resolve_voice, _LANG_MAP,
+    )
     import server
 
 
@@ -141,23 +146,143 @@ class TestExpandCurrency:
         assert _expand_currency("5.00", "dollars") == "5 dollars"
 
 
+# --- Issue #13: fasttext language detection tests ---
+
+class TestDetectLanguageUnicode:
+    """Test the Unicode fallback detector (_detect_language_unicode)."""
+
+    def test_chinese_characters(self):
+        assert _detect_language_unicode("你好世界") == "Chinese"
+
+    def test_japanese_hiragana(self):
+        assert _detect_language_unicode("こんにちは") == "Japanese"
+
+    def test_japanese_katakana(self):
+        assert _detect_language_unicode("カタカナ") == "Japanese"
+
+    def test_korean(self):
+        assert _detect_language_unicode("안녕하세요") == "Korean"
+
+    def test_english_default(self):
+        assert _detect_language_unicode("Hello world") == "English"
+
+    def test_empty_string(self):
+        assert _detect_language_unicode("") == "English"
+
+    def test_numbers_only(self):
+        assert _detect_language_unicode("12345") == "English"
+
+    def test_mixed_starts_with_chinese(self):
+        assert _detect_language_unicode("你好 hello") == "Chinese"
+
+
+class TestLangMap:
+    """Test the ISO code to Qwen language name mapping."""
+
+    def test_known_codes(self):
+        assert _LANG_MAP["zh"] == "Chinese"
+        assert _LANG_MAP["en"] == "English"
+        assert _LANG_MAP["ja"] == "Japanese"
+        assert _LANG_MAP["ko"] == "Korean"
+        assert _LANG_MAP["fr"] == "French"
+        assert _LANG_MAP["de"] == "German"
+        assert _LANG_MAP["es"] == "Spanish"
+
+    def test_all_ten_languages(self):
+        assert len(_LANG_MAP) == 10
+
+
+class TestGetLangdetect:
+    """Test lazy-loading of the fasttext detector."""
+
+    def test_returns_false_when_import_fails(self):
+        server._langdetect_model = None
+        with patch.dict(sys.modules, {"fasttext_langdetect": None}):
+            with patch("builtins.__import__", side_effect=ImportError("no module")):
+                result = _get_langdetect()
+        assert result is False
+        server._langdetect_model = None
+
+    def test_caches_result(self):
+        server._langdetect_model = "cached_value"
+        result = _get_langdetect()
+        assert result == "cached_value"
+        server._langdetect_model = None
+
+
+class TestDetectLanguageWithFasttext:
+    """Test detect_language with mocked fasttext detector."""
+
+    def test_uses_fasttext_when_available(self):
+        mock_detector = MagicMock(return_value={"lang": "fr", "score": 0.99})
+        server._langdetect_model = None
+        with patch.object(server, "_get_langdetect", return_value=mock_detector):
+            result = detect_language("Bonjour le monde")
+        assert result == "French"
+        mock_detector.assert_called_once_with("Bonjour le monde", low_memory=False)
+
+    def test_maps_zh_to_chinese(self):
+        mock_detector = MagicMock(return_value={"lang": "zh", "score": 0.95})
+        with patch.object(server, "_get_langdetect", return_value=mock_detector):
+            result = detect_language("你好")
+        assert result == "Chinese"
+
+    def test_maps_ja_to_japanese(self):
+        mock_detector = MagicMock(return_value={"lang": "ja", "score": 0.95})
+        with patch.object(server, "_get_langdetect", return_value=mock_detector):
+            result = detect_language("こんにちは")
+        assert result == "Japanese"
+
+    def test_maps_en_to_english(self):
+        mock_detector = MagicMock(return_value={"lang": "en", "score": 0.99})
+        with patch.object(server, "_get_langdetect", return_value=mock_detector):
+            result = detect_language("Hello world")
+        assert result == "English"
+
+    def test_unknown_lang_defaults_to_english(self):
+        mock_detector = MagicMock(return_value={"lang": "xx", "score": 0.5})
+        with patch.object(server, "_get_langdetect", return_value=mock_detector):
+            result = detect_language("something")
+        assert result == "English"
+
+    def test_falls_back_on_exception(self):
+        mock_detector = MagicMock(side_effect=RuntimeError("model error"))
+        with patch.object(server, "_get_langdetect", return_value=mock_detector):
+            result = detect_language("Hello world")
+        assert result == "English"
+
+    def test_falls_back_when_fasttext_unavailable(self):
+        with patch.object(server, "_get_langdetect", return_value=False):
+            result = detect_language("你好世界")
+        assert result == "Chinese"
+
+    def test_falls_back_unicode_korean(self):
+        with patch.object(server, "_get_langdetect", return_value=False):
+            result = detect_language("안녕하세요")
+        assert result == "Korean"
+
+    def test_maps_all_supported_languages(self):
+        for iso, name in _LANG_MAP.items():
+            mock_detector = MagicMock(return_value={"lang": iso, "score": 0.9})
+            with patch.object(server, "_get_langdetect", return_value=mock_detector):
+                result = detect_language("test")
+            assert result == name, f"Failed for {iso} -> {name}"
+
+
 # --- Issue #5: TF32 matmul mode tests ---
 
 class TestTF32Flags:
     """Issue #5: TF32 matmul and cudnn flags should be enabled on CUDA hardware."""
 
     def test_tf32_matmul_enabled(self):
-        """torch.backends.cuda.matmul.allow_tf32 should be True after server import."""
         if torch.cuda.is_available():
             assert torch.backends.cuda.matmul.allow_tf32 is True
 
     def test_tf32_cudnn_enabled(self):
-        """torch.backends.cudnn.allow_tf32 should be True after server import."""
         if torch.cuda.is_available():
             assert torch.backends.cudnn.allow_tf32 is True
 
     def test_cudnn_benchmark_enabled(self):
-        """torch.backends.cudnn.benchmark should be True after server import."""
         if torch.cuda.is_available():
             assert torch.backends.cudnn.benchmark is True
 
@@ -171,19 +296,3 @@ class TestResolveVoice:
         assert resolve_voice("alloy") == "ryan"
     def test_case_insensitive(self):
         assert resolve_voice("VIVIAN") == "vivian"
-
-
-class TestDetectLanguage:
-    def test_english(self):
-        assert detect_language("Hello world") == "English"
-    def test_chinese(self):
-        assert detect_language("你好世界") == "Chinese"
-
-    def test_japanese(self):
-        assert detect_language("こんにちは") == "Japanese"
-
-    def test_korean(self):
-        assert detect_language("안녕하세요") == "Korean"
-
-    def test_mixed_defaults_to_first_match(self):
-        assert detect_language("Hello 你好") == "Chinese"
