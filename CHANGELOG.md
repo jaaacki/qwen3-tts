@@ -1,5 +1,15 @@
 # Changelog
 
+## [Docs] 2026-02-20 — Improvement roadmap and project documentation
+
+### Added
+- `ROADMAP.md` — three-phase improvement plan (v0.1.0 Real-Time, v0.2.0 Speed & Quality, v0.3.0 Production Grade) with 36 linked GitHub issues
+- `LEARNING_LOG.md` — 7 narrative entries covering architecture baseline, streaming rationale, max_new_tokens discovery, phase ordering logic, streaming risks, GPU tuning, and caching hierarchy
+- `improvements.md` — full catalogue of 40 optimizations with performance estimates, implementation sketches, and execution order
+- GitHub milestones: Phase 1 (#1), Phase 2 (#2), Phase 3 (#3)
+- GitHub issues: #1–#36 covering all roadmap items with What/Why/Expectations for each
+- GitHub labels: `phase-1`, `phase-2`, `phase-3`, `enhancement`, `refactor`, `chore`
+
 ## v0.3.2 — 2026-02-07
 
 ### Fixed
