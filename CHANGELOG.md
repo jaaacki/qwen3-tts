@@ -11,6 +11,80 @@
 ## [Unreleased — Issue #36: remove dead VoiceCloneRequest] — 2026-02-20
 ### Changed
 - Remove unused `VoiceCloneRequest` Pydantic model from `server.py` — the `/clone` endpoint uses `Form()` parameters directly; model was dead code (#36)
+## [Unreleased — Issue #16: Pre-allocate GPU memory pool] — 2026-02-20
+### Added
+- GPU memory pool pre-warming after model warmup — allocates and frees a 128 MB dummy tensor to pre-reserve a contiguous CUDA memory block, reducing first-request allocation jitter (#16)
+- `max_split_size_mb:512` added to `PYTORCH_CUDA_ALLOC_CONF` in Dockerfile to reduce memory fragmentation from large allocations
+
+## [Unreleased — Issue #15: Add voice prompt cache for /clone endpoint] — 2026-02-20
+### Added
+- Voice prompt cache for `/clone` endpoint — caches processed reference audio by SHA-256 content hash (#15)
+- `VOICE_CACHE_MAX` env var (default: 32) — controls LRU cache capacity; set to 0 to disable
+- Cache stats exposed in `/health` endpoint: `voice_cache_size`, `voice_cache_max`, `voice_cache_hits`
+
+## [Unreleased — Issue #14: Replace scipy speed adjustment with pyrubberband] — 2026-02-20
+### Changed
+- `_adjust_speed()` now uses `pyrubberband.time_stretch()` for pitch-preserving speed changes, falling back to `scipy.signal.resample` when pyrubberband is unavailable (#14)
+- Added `pyrubberband` to Dockerfile pip dependencies and `rubberband-cli` to apt dependencies
+
+## [Unreleased — Issue #13: Replace Unicode language heuristic with fasttext detection] — 2026-02-20
+### Changed
+- `detect_language()` now uses `fasttext-langdetect` for accurate multi-language detection across 10 languages, falling back to Unicode character-range heuristic when fasttext is unavailable (#13)
+- Added `fasttext-langdetect` to Dockerfile dependencies
+- Added `_get_langdetect()` lazy-loader, `_detect_language_unicode()` fallback, and `_LANG_MAP` ISO-to-Qwen mapping
+
+## [Unreleased — Issue #10: Multi-length GPU warmup] — 2026-02-20
+### Changed
+- GPU warmup now runs 3 synthesis calls at different text lengths (5, 30, 90 chars) to pre-cache more CUDA kernel paths (#10)
+
+## [Unreleased — Issue #9: Enable torch.compile] — 2026-02-20
+### Added
+- `torch.compile` on model forward pass with `reduce-overhead` mode for faster inference (#9)
+- `TORCH_COMPILE` env var (default: true) to opt-in/out of compilation
+
+## [Unreleased — Issue #8: Switch to flash_attention_2] — 2026-02-20
+### Changed
+- Switch attention implementation from `sdpa` to `flash_attention_2` with graceful fallback (#8)
+- Added `flash-attn` to Dockerfile dependencies
+
+## [Unreleased — Issue #7: Lock GPU clocks to max boost] — 2026-02-20
+### Changed
+- `docker-entrypoint.sh` — lock GPU clocks to max boost frequency at container startup for consistent inference latency (#7)
+
+## [Unreleased — Issue #6: Enable GPU persistence mode] — 2026-02-20
+### Added
+- `docker-entrypoint.sh` — GPU persistence mode (`nvidia-smi -pm 1`) runs at container startup, eliminating 200-500ms GPU cold-start penalty (#6)
+
+### Changed
+- Dockerfile now uses ENTRYPOINT for GPU tuning before uvicorn starts
+
+## [Unreleased — Issue #5: Enable TF32 matmul mode] — 2026-02-20
+### Changed
+- Enable TF32 matmul and cuDNN TF32 on Ampere+ GPUs for ~3x faster matrix operations (#5)
+
+## [Unreleased — Issue #4: Add raw PCM streaming endpoint] — 2026-02-20
+### Added
+- `POST /v1/audio/speech/stream/pcm` — raw PCM streaming endpoint; splits text into sentences, streams each as raw int16 PCM bytes with `X-PCM-Sample-Rate`, `X-PCM-Bit-Depth`, `X-PCM-Channels` headers (#4)
+
+## [Unreleased — Issue #3: Add sentence-chunked SSE streaming] — 2026-02-20
+### Added
+- Sentence-chunked SSE streaming endpoint `POST /v1/audio/speech/stream` (#3)
+  - Splits input into sentences with abbreviation-aware regex
+  - Streams base64-encoded raw PCM (int16, 24kHz) via Server-Sent Events
+  - Sends `data: [DONE]` on completion, `data: [ERROR] message` on failure
+  - Updates `_last_used` per chunk to prevent idle unload during streaming
+
+## [Unreleased — Issue #2: Add adaptive max_new_tokens scaling] — 2026-02-20
+### Changed
+- Replace hardcoded `max_new_tokens: 2048` with adaptive scaling based on input text length (#2)
+  - Short inputs (<=16 words) get minimum budget of 128 tokens
+  - Budget scales at 8 tokens/word with a cap at 2048
+  - Reduces KV-cache allocation overhead by up to 40x for short texts
+
+## [Unreleased — Issue #1: Add per-request latency breakdown logging] — 2026-02-20
+### Added
+- Per-request latency breakdown logging via `logging.getLogger("qwen3-tts")` with `time.perf_counter()` timing in both `/v1/audio/speech` and `/v1/audio/speech/clone` endpoints (#1)
+- Logged fields: `queue_ms`, `inference_ms`, `encode_ms`, `total_ms`, `chars`, `voice`, `format`, `language`
 
 ## [Docs] 2026-02-20 — Improvement roadmap and project documentation
 

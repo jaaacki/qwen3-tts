@@ -10,10 +10,10 @@ Three-phase plan to take Qwen3-TTS from a working prototype to a production-grad
 
 Before optimizing anything, we instrument. Then we remove the biggest bottleneck (fixed token budget), and finally deliver streaming so clients hear audio while synthesis continues.
 
-- [ ] #1 Add per-request latency breakdown logging
-- [ ] #2 Add adaptive `max_new_tokens` scaling with text length
-- [ ] #3 Add sentence-chunked SSE streaming endpoint
-- [ ] #4 Add raw PCM streaming endpoint
+- [x] #1 Add per-request latency breakdown logging
+- [x] #2 Add adaptive `max_new_tokens` scaling with text length
+- [x] #3 Add sentence-chunked SSE streaming endpoint
+- [x] #4 Add raw PCM streaming endpoint
 
 ---
 
@@ -23,18 +23,18 @@ Before optimizing anything, we instrument. Then we remove the biggest bottleneck
 
 GPU tuning flags come first because they are low-risk and establish a faster baseline for benchmarking everything after. Inference optimizations build on that baseline. Audio quality improvements come last in the phase because they depend on a stable, fast inference path.
 
-- [ ] #5 Enable TF32 matmul mode
-- [ ] #6 Enable GPU persistence mode
-- [ ] #7 Lock GPU clocks to max boost
-- [ ] #8 Switch `attn_implementation` to `flash_attention_2`
-- [ ] #9 Enable `torch.compile` on model forward pass
-- [ ] #10 Deepen GPU warmup with multi-length synthesis calls
-- [ ] #11 Add VAD silence trimming (strip leading/trailing silence)
-- [ ] #12 Add text normalization for numbers, currency, abbreviations
-- [ ] #13 Replace Unicode language heuristic with fasttext detection
-- [ ] #14 Replace scipy speed adjustment with pitch-preserving pyrubberband
-- [ ] #15 Add voice prompt cache for `/clone` endpoint
-- [ ] #16 Pre-allocate GPU memory pool to reduce allocation jitter
+- [x] #5 Enable TF32 matmul mode
+- [x] #6 Enable GPU persistence mode
+- [x] #7 Lock GPU clocks to max boost
+- [x] #8 Switch `attn_implementation` to `flash_attention_2`
+- [x] #9 Enable `torch.compile` on model forward pass
+- [x] #10 Deepen GPU warmup with multi-length synthesis calls
+- [x] #11 Add VAD silence trimming (strip leading/trailing silence)
+- [x] #12 Add text normalization for numbers, currency, abbreviations
+- [x] #13 Replace Unicode language heuristic with fasttext detection
+- [x] #14 Replace scipy speed adjustment with pitch-preserving pyrubberband
+- [x] #15 Add voice prompt cache for `/clone` endpoint
+- [x] #16 Pre-allocate GPU memory pool to reduce allocation jitter
 
 ---
 

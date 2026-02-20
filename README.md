@@ -51,6 +51,27 @@ curl -X POST http://localhost:8101/v1/audio/speech \
 | `speed` | float | `1.0` | Playback speed multiplier |
 | `language` | string | *auto-detect* | Language override |
 
+
+### `POST /v1/audio/speech/stream`
+
+Stream speech synthesis via Server-Sent Events. Each sentence is synthesized independently and streamed as base64-encoded raw PCM audio (signed 16-bit, 24 kHz, mono).
+
+```bash
+curl -N -X POST http://localhost:8101/v1/audio/speech/stream \\
+  -H "Content-Type: application/json" \\
+  -d '{"input": "First sentence. Second sentence.", "voice": "vivian"}'
+```
+
+Each SSE event contains base64-encoded PCM data. The stream ends with `data: [DONE]`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `input` | string | *required* | Text to synthesize |
+| `voice` | string | `vivian` | Voice name or OpenAI alias |
+| `speed` | float | `1.0` | Playback speed multiplier |
+| `language` | string | *auto-detect* | Language override |
+| `instruct` | string | *optional* | Style/instruction control |
+
 ### `POST /v1/audio/speech/clone`
 
 Generate speech using a cloned voice from a reference audio file.
@@ -80,6 +101,25 @@ curl -X POST http://localhost:8101/cache/clear
 # {"cleared": 42}
 ```
 
+### `POST /v1/audio/speech/stream/pcm`
+
+Stream speech as raw PCM audio. Text is split into sentences and each sentence is synthesized and streamed as raw int16 bytes. Use the response headers to configure your audio player.
+
+```bash
+curl -X POST http://localhost:8101/v1/audio/speech/stream/pcm \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hello, world! This is streaming PCM audio.", "voice": "vivian"}' \
+  -o speech.pcm
+# Play with: ffplay -f s16le -ar 24000 -ac 1 speech.pcm
+```
+
+| Header | Value | Description |
+|--------|-------|-------------|
+| `X-PCM-Sample-Rate` | `24000` | Sample rate in Hz |
+| `X-PCM-Bit-Depth` | `16` | Bits per sample (signed int16) |
+| `X-PCM-Channels` | `1` | Mono audio |
+
+Request body parameters are the same as `/v1/audio/speech`.
 ### `GET /health`
 
 Returns service status, model info, CUDA availability, available voices, and cache stats (`audio_cache_size`, `audio_cache_max`).
@@ -94,6 +134,10 @@ Environment variables in `compose.yaml`:
 | `IDLE_TIMEOUT` | `120` | Seconds of inactivity before unloading model from GPU (0 = disabled) |
 | `REQUEST_TIMEOUT` | `300` | Maximum seconds per inference request |
 | `AUDIO_CACHE_MAX` | `256` | Max LRU cache entries for audio output (0 = disabled) |
+| `TORCH_COMPILE` | `true` | Enable torch.compile optimization (set to false to disable) |
+| `VAD_TRIM` | `true` | Trim leading/trailing silence from generated audio |
+| `TEXT_NORMALIZE` | `true` | Expand numbers, currency, and abbreviations before synthesis |
+| `VOICE_CACHE_MAX` | `32` | LRU cache capacity for processed voice clone reference audio (0 = disabled) |
 
 The model cache is persisted to `./models` via volume mount.
 

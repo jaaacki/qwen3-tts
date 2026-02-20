@@ -4,6 +4,36 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0012 — GPU memory pool pre-warming and CUDA allocator tuning
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #16 — Pre-allocate GPU memory pool to reduce allocation jitter
+
+CUDA memory allocation is lazy by default. The first time a tensor of a given size is allocated, the CUDA allocator calls `cudaMalloc`, which involves a kernel-mode transition and device synchronization. This takes 1-5ms per allocation. For a TTS server handling its first request after model load, there are multiple novel allocation sizes (KV-cache, attention intermediates, audio output buffers), each paying this penalty. The cumulative cost can add 10-30ms to the first inference.
+
+The fix is a dummy allocation: after warmup, allocate a 128 MB tensor (`torch.empty(64*1024*1024, dtype=bfloat16, device="cuda")`) and immediately delete it. This forces the CUDA allocator to reserve a contiguous 128 MB block in its free pool. Subsequent allocations that fit within this block are served from the pool without `cudaMalloc` calls.
+
+The `max_split_size_mb:512` addition to `PYTORCH_CUDA_ALLOC_CONF` prevents the allocator from splitting large cached blocks into small fragments. Without this, the allocator might split a 128 MB cached block into many small pieces to serve a 1 MB request, then not be able to recombine them when a 64 MB request arrives.
+
+---
+
+## Entry 0008 — Why pitch-preserving time stretch matters for TTS
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #14 — Replace scipy speed adjustment with pitch-preserving pyrubberband
+
+The original speed adjustment used `scipy.signal.resample()` to change the number of audio samples. This is a frequency-domain resampling that compresses or expands the waveform uniformly. The problem: when you compress samples to make audio play faster, the fundamental frequency of the voice shifts upward proportionally. At speed=1.5, the voice pitch rises by 50%, creating the classic "chipmunk" effect. At speed=0.75, the pitch drops, making the voice sound artificially deep.
+
+For a TTS server, this is unacceptable. Speed adjustment is used for accessibility (slower speech for comprehension), time fitting (faster speech for constrained UIs), and prosody matching (adjusting pace to context). In all cases, the user expects the voice to sound like the same person speaking at a different pace, not a pitch-shifted version.
+
+pyrubberband wraps the Rubber Band Library, which implements PSOLA (Pitch-Synchronous Overlap-Add) time stretching. PSOLA works by identifying pitch periods in the audio, duplicating or removing complete pitch cycles, and crossfading at zero-crossing points. The result is audio that plays faster or slower without any pitch change. The algorithm is well-established in audio processing and adds negligible latency (< 10ms for typical TTS output lengths).
+
+The implementation uses the same graceful-fallback pattern as other optional dependencies: if `pyrubberband` is not importable, `_pyrubberband` is set to `None` and the function falls back to `scipy.signal.resample`. This keeps the server functional on systems without the rubberband-cli binary installed, at the cost of the pitch shift artifact.
+
+The Dockerfile installs both `pyrubberband` (Python bindings) and `rubberband-cli` (the C++ binary that pyrubberband calls). The binary is available in Ubuntu's package manager, so no compilation is needed.
+
+---
+
 ## Entry 0001 — Project baseline: current architecture
 **Date**: 2026-02-20
 **Type**: Why this design
@@ -120,6 +150,25 @@ None of these changes appear in a typical code review. They are infrastructure-l
 
 ---
 
+## Entry 0008 — Why fasttext over Unicode heuristic for language detection
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #13 — Replace Unicode language heuristic with fasttext detection
+
+The original `detect_language()` function used a character-range heuristic: scan the input text for CJK, Hiragana/Katakana, or Hangul characters, and default to English for anything else. This works for scripts with unique Unicode ranges but fails completely for languages that share the Latin alphabet. French, German, Spanish, Italian, Portuguese, and Russian are all detected as "English" because their characters fall within ASCII or basic Latin ranges.
+
+The Qwen3-TTS model supports all of these languages. A French user sending "Bonjour le monde" gets English prosody applied because the server cannot tell the difference. This is not a theoretical problem — it affects every European language user.
+
+The fix uses `fasttext-langdetect`, which wraps Facebook's fasttext language identification model. It returns ISO 639-1 codes (e.g., "fr", "de", "es") with confidence scores. A mapping dict (`_LANG_MAP`) converts these to the Qwen-expected language names. The implementation is a graceful upgrade: if `fasttext-langdetect` is not installed, the function falls back to the original Unicode heuristic. This means the server works identically without the dependency — it just cannot detect Latin-script languages beyond English.
+
+Key design decisions:
+- **Lazy loading**: The fasttext model loads on first call to `detect_language()`, not at import time. This avoids slowing down startup for a model that might not be needed if every request provides an explicit `language` parameter.
+- **False sentinel**: `_langdetect_model` uses `False` (not `None`) to distinguish "tried to import and failed" from "haven't tried yet". This prevents retrying the import on every request when the package is genuinely missing.
+- **low_memory=False**: The fasttext model is small (~1MB). Loading it fully into memory is faster than the compressed low-memory mode, and the memory cost is negligible compared to the TTS model.
+- **Default to English for unknown ISO codes**: If fasttext returns a language code not in `_LANG_MAP` (e.g., "tl" for Tagalog), the function returns "English" rather than passing through the raw code. This is because Qwen3-TTS has a fixed set of supported languages, and an unsupported language name would cause an inference error.
+
+---
+
 ## Entry 0007 — The caching hierarchy
 **Date**: 2026-02-20
 **Type**: Why this design
@@ -153,3 +202,79 @@ The cache check happens before `_ensure_model_loaded()`. This is deliberate: if 
 LRU eviction uses `OrderedDict.move_to_end()` on hit and `popitem(last=False)` when full. This is O(1) for both operations. The default capacity of 256 entries is sized for a typical IVR deployment where 20-50 unique system phrases repeat across thousands of calls. At roughly 100KB per WAV entry (1 second of 24kHz 16-bit audio), 256 entries consume about 25MB of RAM — negligible compared to the 2.4GB model.
 
 Setting `AUDIO_CACHE_MAX=0` disables all cache operations: `_get_audio_cache` returns None immediately, `_set_audio_cache` is a no-op. This is the safe default for testing or debugging where deterministic behavior is needed.
+
+---
+
+## Entry 0009 — GPU persistence mode and the entrypoint pattern
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #6
+
+We introduced `docker-entrypoint.sh` as the container's ENTRYPOINT, running GPU tuning commands before exec-ing into uvicorn. GPU settings like `nvidia-smi -pm 1` cannot be baked into the image at build time (no GPU during build). The entrypoint runs at container start when the GPU is available via NVIDIA runtime. The `|| echo` pattern ensures the service starts even without sufficient permissions.
+
+---
+
+## Entry 0009 — flash_attention_2: hardware requirements and fallback
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #8
+
+Switched the model's attention implementation from PyTorch's native SDPA to Flash Attention 2. Flash Attention 2 uses fused CUDA kernels that are 15-20% faster and use less memory by avoiding materialization of the full attention matrix.
+
+Hardware requirement: Flash Attention 2 requires Ampere or newer GPUs (compute capability >= 8.0). This means RTX 3000/4000 series, A100, H100. On older hardware (V100, RTX 2000), the `flash-attn` package either won't install or won't work at runtime.
+
+The fallback pattern is a simple try/except on `import flash_attn`. If the import fails, we fall back to `sdpa` (PyTorch's built-in scaled dot product attention). This means the code works on any GPU — it just runs faster on newer ones. The check happens at model load time, not at import time, so the server starts correctly even without flash-attn installed.
+
+---
+
+## Entry 0011 — Voice prompt cache: hash bytes not filenames
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: Issue #15 — Add voice prompt cache for /clone endpoint
+
+The voice cloning endpoint processes reference audio on every request: read bytes, decode with soundfile, convert stereo to mono. When the same reference audio is reused across requests (the common case — a user picks a voice and uses it repeatedly), this processing is redundant.
+
+The cache key is a SHA-256 hash of the raw audio bytes, not the filename. Filenames are unreliable — the same file can be uploaded with different names, and different files can share a name. Content hashing guarantees that identical audio produces the same key regardless of how it was uploaded.
+
+The cache uses `collections.OrderedDict` as an LRU. On hit, `move_to_end()` promotes the entry; on insert, `popitem(last=False)` evicts the oldest entry when capacity exceeds `VOICE_CACHE_MAX`. This is simpler than `functools.lru_cache` because the cache key is a hash string (not the raw bytes), and we need manual control over cache size via an env var that can be set to 0 to disable caching entirely.
+
+The health endpoint exposes `voice_cache_size`, `voice_cache_max`, and `voice_cache_hits` so operators can monitor hit rates and tune capacity.
+
+---
+
+## Entry 0010 — torch.compile: the first-inference cost
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: #9
+
+Enabled `torch.compile(model.model, mode="reduce-overhead", fullgraph=False)` after model loading. This tells PyTorch to trace the model's forward pass and generate optimized CUDA kernels, eliminating Python overhead on subsequent calls.
+
+The trade-off is first-inference latency. The first call after compilation triggers the tracing/compiling step, which can take 10-30 seconds depending on model size and GPU. After that, every subsequent inference is faster. For a TTS server that loads the model once and runs many requests, this is a clear win -- the compilation cost is amortized across all requests.
+
+`mode="reduce-overhead"` uses CUDA graphs which are ideal for repeated inference with similar-shaped inputs (exactly the TTS use case). `fullgraph=False` allows partial compilation if some operations aren't compilable, avoiding hard failures.
+
+The `TORCH_COMPILE` env var (default true) provides an escape hatch for environments where compilation causes issues (older PyTorch versions, unsupported ops).
+
+---
+
+## Entry 0012 — SSE streaming: base64 PCM over text/event-stream
+**Date**: 2026-02-20
+**Type**: What just happened
+**Related**: Issue #3
+
+The streaming endpoint sends audio as base64-encoded raw PCM inside SSE events. This was chosen over chunked WAV (which requires a RIFF header with total data size, impossible for streaming) and raw binary HTTP chunks (no framing protocol, client must guess byte boundaries). SSE gives us text-based framing with `data:` prefix and `\n\n` delimiters, plus built-in reconnection semantics. Base64 adds ~33% overhead but keeps the protocol clean — for zero-overhead binary streaming, issue #4 adds a separate raw PCM endpoint. The `_last_used` update per chunk prevents the idle watchdog from unloading the model mid-stream.
+
+---
+
+## Entry 0011 — TF32: why it is safe for this model
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #5
+
+TF32 (TensorFloat-32) is a numeric format available on Ampere and newer NVIDIA GPUs. It uses the same 8-bit exponent as float32 but truncates the mantissa from 23 bits to 10 bits, allowing matrix multiplications to run on Tensor Core hardware at roughly 3x the throughput.
+
+The safety argument for enabling TF32 on this model is straightforward: the model already runs in bfloat16, which has only 7 bits of mantissa. TF32 intermediate operations have 10 bits of mantissa — strictly more precision than the model's own weight format. Enabling TF32 cannot lose information that bfloat16 already discards.
+
+Two separate flags are needed: `torch.backends.cuda.matmul.allow_tf32` controls general matrix multiplication, and `torch.backends.cudnn.allow_tf32` controls cuDNN convolution operations. Both default to False in PyTorch. On pre-Ampere GPUs these flags are no-ops — the hardware simply ignores them.
+
+The test strategy uses mock-based reimport rather than `if torch.cuda.is_available()` guards. This ensures tests actually assert on non-CUDA CI machines instead of silently passing. The pattern: reset flags to False, mock `cuda.is_available` to return True, reimport the server module, verify flags became True.

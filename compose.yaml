@@ -12,6 +12,10 @@ services:
       - REQUEST_TIMEOUT=300
       - IDLE_TIMEOUT=120
       - AUDIO_CACHE_MAX=256
+      - TORCH_COMPILE=true
+      - VAD_TRIM=true
+      - TEXT_NORMALIZE=true
+      - VOICE_CACHE_MAX=32
     volumes:
       - ./models:/root/.cache/huggingface
     shm_size: "1g"
