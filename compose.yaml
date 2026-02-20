@@ -12,6 +12,7 @@ services:
       - REQUEST_TIMEOUT=300
       - IDLE_TIMEOUT=120
       - TORCH_COMPILE=true
+      - VAD_TRIM=true
     volumes:
       - ./models:/root/.cache/huggingface
     shm_size: "1g"

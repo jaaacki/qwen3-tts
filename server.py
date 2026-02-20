@@ -44,6 +44,9 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 # Idle unload timeout in seconds (0 = disabled)
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "120"))
 
+# VAD silence trimming (strip leading/trailing silence from audio)
+VAD_TRIM = os.getenv("VAD_TRIM", "true").lower() in ("true", "1", "yes")
+
 # Track last request time
 _last_used = 0.0
 
@@ -286,6 +289,23 @@ def detect_language(text: str) -> str:
     return "English"
 
 
+def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: float = -40.0) -> np.ndarray:
+    """Trim leading and trailing silence from audio array."""
+    if not VAD_TRIM:
+        return audio
+    threshold = 10 ** (threshold_db / 20.0)
+    non_silent = np.abs(audio) > threshold
+    if not np.any(non_silent):
+        return audio  # all silence, return as-is
+    start = np.argmax(non_silent)
+    end = len(non_silent) - np.argmax(non_silent[::-1])
+    # Add small padding (50ms) to avoid cutting speech
+    pad = int(0.05 * sample_rate)
+    start = max(0, start - pad)
+    end = min(len(audio), end + pad)
+    return audio[start:end]
+
+
 def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
     with torch.inference_mode():
@@ -339,6 +359,8 @@ async def synthesize_speech(request: TTSRequest):
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
+
+        audio_data = _trim_silence(audio_data, sr)
 
         # Speed adjustment via resampling
         if request.speed != 1.0:
@@ -410,6 +432,8 @@ async def clone_voice(
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
+
+        audio_data = _trim_silence(audio_data, sr)
 
         audio_bytes_out, content_type = convert_audio_format(
             audio_data, sr, response_format
