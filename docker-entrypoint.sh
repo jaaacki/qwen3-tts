@@ -5,8 +5,14 @@
 nvidia-smi -pm 1 2>/dev/null || echo "Warning: could not set GPU persistence mode"
 
 # Lock GPU clocks to max boost for consistent latency
-nvidia-smi --lock-gpu-clocks=0,9999 2>/dev/null || \
-  nvidia-smi -lgc 0,$(nvidia-smi --query-gpu=clocks.max.gr --format=csv,noheader,nounits 2>/dev/null | head -1) 2>/dev/null || \
-  echo "Warning: could not lock GPU clocks (may need privileged or specific GPU support)"
+if ! nvidia-smi --lock-gpu-clocks=0,9999 2>/dev/null; then
+  _MAX_CLOCK=$(nvidia-smi --query-gpu=clocks.max.gr --format=csv,noheader,nounits 2>/dev/null | head -1)
+  if [ -n "$_MAX_CLOCK" ]; then
+    nvidia-smi -lgc 0,"$_MAX_CLOCK" 2>/dev/null || \
+      echo "Warning: could not lock GPU clocks (may need privileged or specific GPU support)"
+  else
+    echo "Warning: could not lock GPU clocks (may need privileged or specific GPU support)"
+  fi
+fi
 
 exec "$@"
