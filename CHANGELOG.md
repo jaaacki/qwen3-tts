@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #1: Add per-request latency breakdown logging] — 2026-02-20
+### Added
+- Per-request latency breakdown logging via `logging.getLogger("qwen3-tts")` with `time.perf_counter()` timing in both `/v1/audio/speech` and `/v1/audio/speech/clone` endpoints (#1)
+- Logged fields: `queue_ms`, `inference_ms`, `encode_ms`, `total_ms`, `chars`, `voice`, `format`, `language`
+
 ## [Docs] 2026-02-20 — Improvement roadmap and project documentation
 
 ### Added

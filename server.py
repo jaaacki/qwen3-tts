@@ -12,6 +12,9 @@ import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
+import logging
+
+logger = logging.getLogger("qwen3-tts")
 
 try:
     from pydub import AudioSegment as _PydubAudioSegment
@@ -289,6 +292,7 @@ def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
     """OpenAI-compatible TTS endpoint using CustomVoice model."""
+    t_start = time.perf_counter()
     await _ensure_model_loaded()
 
     if not request.input or not request.input.strip():
@@ -300,8 +304,10 @@ async def synthesize_speech(request: TTSRequest):
         gen_kwargs = {"max_new_tokens": 2048}
         text = request.input.strip()
 
+        t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
+            t_infer_start = time.perf_counter()
             wavs, sr = await asyncio.wait_for(
                 loop.run_in_executor(
                     _infer_executor,
@@ -309,6 +315,7 @@ async def synthesize_speech(request: TTSRequest):
                 ),
                 timeout=REQUEST_TIMEOUT
             )
+        t_infer_end = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
@@ -322,6 +329,22 @@ async def synthesize_speech(request: TTSRequest):
 
         audio_bytes, content_type = convert_audio_format(
             audio_data, sr, request.response_format
+        )
+        t_end = time.perf_counter()
+
+        logger.info(
+            "request_complete",
+            extra={
+                "endpoint": "/v1/audio/speech",
+                "queue_ms": round((t_infer_start - t_queue) * 1000, 1),
+                "inference_ms": round((t_infer_end - t_infer_start) * 1000, 1),
+                "encode_ms": round((t_end - t_infer_end) * 1000, 1),
+                "total_ms": round((t_end - t_start) * 1000, 1),
+                "chars": len(text),
+                "voice": speaker,
+                "format": request.response_format,
+                "language": language,
+            },
         )
 
         return Response(
@@ -349,6 +372,7 @@ async def clone_voice(
     response_format: str = Form("wav"),
 ):
     """Voice cloning endpoint - requires a reference audio file."""
+    t_start = time.perf_counter()
     await _ensure_model_loaded()
 
     if not input or not input.strip():
@@ -365,8 +389,10 @@ async def clone_voice(
         gen_kwargs = {"max_new_tokens": 2048}
         text = input.strip()
 
+        t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
         async with _infer_semaphore:
+            t_infer_start = time.perf_counter()
             wavs, sr = await asyncio.wait_for(
                 loop.run_in_executor(
                     _infer_executor,
@@ -380,6 +406,7 @@ async def clone_voice(
                 ),
                 timeout=REQUEST_TIMEOUT
             )
+        t_infer_end = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
@@ -387,6 +414,21 @@ async def clone_voice(
 
         audio_bytes_out, content_type = convert_audio_format(
             audio_data, sr, response_format
+        )
+        t_end = time.perf_counter()
+
+        logger.info(
+            "request_complete",
+            extra={
+                "endpoint": "/v1/audio/speech/clone",
+                "queue_ms": round((t_infer_start - t_queue) * 1000, 1),
+                "inference_ms": round((t_infer_end - t_infer_start) * 1000, 1),
+                "encode_ms": round((t_end - t_infer_end) * 1000, 1),
+                "total_ms": round((t_end - t_start) * 1000, 1),
+                "chars": len(text),
+                "format": response_format,
+                "language": language,
+            },
         )
 
         return Response(
