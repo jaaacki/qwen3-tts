@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased — Issue #32: Request queue depth limit] — 2026-02-20
+### Added
+- Request queue depth limit with 503 early rejection (#32)
+- `MAX_QUEUE_DEPTH` env var (default 5, 0 = unlimited)
+- `Retry-After: 5` header on 503 responses
+- `queue_depth` and `max_queue_depth` fields in `/health` response
+
 ## [Unreleased — Issue #31: Structured JSON logging] — 2026-02-20
 ### Added
 - Structured JSON logging with per-request fields (#31)

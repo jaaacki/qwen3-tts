@@ -179,6 +179,7 @@ Environment variables in `compose.yaml`:
 | `SSL_KEYFILE` | *(empty)* | Path to TLS private key (enables HTTP/2) |
 | `SSL_CERTFILE` | *(empty)* | Path to TLS certificate (enables HTTP/2) |
 | `LOG_FORMAT` | `json` | Log format: `json` for structured output, `text` for human-readable |
+| `MAX_QUEUE_DEPTH` | `5` | Max queued requests before 503 rejection (0 = unlimited) |
 
 The model cache is persisted to `./models` via volume mount.
 
