@@ -175,10 +175,31 @@ Environment variables in `compose.yaml`:
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of on first request |
 | `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics at `GET /metrics` |
 | `INFERENCE_CPU_CORES` | *(empty)* | Pin to specific CPU cores (e.g., `0-7`). Empty = no pinning |
+| `UNIX_SOCKET_PATH` | *(empty)* | Path to Unix socket (e.g., `/tmp/tts.sock`). Replaces TCP when set |
 | `SSL_KEYFILE` | *(empty)* | Path to TLS private key (enables HTTP/2) |
 | `SSL_CERTFILE` | *(empty)* | Path to TLS certificate (enables HTTP/2) |
 
 The model cache is persisted to `./models` via volume mount.
+
+### Unix Domain Socket (optional)
+
+For same-host clients, UDS bypasses the TCP stack (~0.1-0.5ms savings per request):
+
+```yaml
+# compose.yaml
+environment:
+  - UNIX_SOCKET_PATH=/tmp/tts.sock
+volumes:
+  - /tmp:/tmp  # share socket with host
+```
+
+Connect from Python:
+```python
+import httpx
+transport = httpx.AsyncHTTPTransport(uds="/tmp/tts.sock")
+async with httpx.AsyncClient(transport=transport) as client:
+    resp = await client.post("http://localhost/v1/audio/speech", json={...})
+```
 
 ### Transparent Huge Pages (optional)
 

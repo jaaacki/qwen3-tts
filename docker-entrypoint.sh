@@ -27,6 +27,12 @@ if [ -n "$LD_PRELOAD" ] && [ -f "$LD_PRELOAD" ]; then
     echo "jemalloc loaded: $LD_PRELOAD"
 fi
 
+# Switch to Unix domain socket mode when UNIX_SOCKET_PATH is set (bypasses TCP stack)
+if [ -n "$UNIX_SOCKET_PATH" ]; then
+    exec uvicorn server:app --uds "$UNIX_SOCKET_PATH" \
+        --loop uvloop --http httptools --no-access-log --timeout-keep-alive 65
+fi
+
 # Append TLS args for HTTP/2 support when SSL certs are provided
 TLS_ARGS=""
 if [ -n "$SSL_KEYFILE" ]; then
