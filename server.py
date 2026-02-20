@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -934,6 +934,64 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
             "Content-Disposition": 'attachment; filename="speech.pcm"',
         },
     )
+
+
+@app.websocket("/v1/audio/speech/ws")
+async def ws_synthesize(websocket: WebSocket):
+    """WebSocket streaming endpoint. Send JSON, receive binary PCM per sentence."""
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            text = (data.get("input") or "").strip()
+            if not text:
+                await websocket.send_json({"event": "error", "detail": "input is required"})
+                continue
+
+            voice = resolve_voice(data.get("voice"))
+            language = data.get("language") or detect_language(text)
+            speed = float(data.get("speed", 1.0))
+
+            await _ensure_model_loaded()
+
+            sentences = _split_sentences(text)
+            if not sentences:
+                sentences = [text]
+
+            for sentence in sentences:
+                gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+                loop = asyncio.get_running_loop()
+                async with _infer_semaphore:
+                    wavs, sr = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            _infer_executor,
+                            lambda s=sentence: _do_synthesize(s, language, voice, gen_kwargs)
+                        ),
+                        timeout=REQUEST_TIMEOUT
+                    )
+
+                audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
+                if audio_data.ndim > 1:
+                    audio_data = audio_data.squeeze()
+
+                if speed != 1.0:
+                    new_length = int(len(audio_data) / speed)
+                    if new_length > 0:
+                        audio_data = scipy_signal.resample(audio_data, new_length)
+
+                pcm = (audio_data * 32767).astype(np.int16).tobytes()
+                await websocket.send_bytes(pcm)
+                global _last_used
+                _last_used = time.time()
+
+            await websocket.send_json({"event": "done"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"event": "error", "detail": str(e)})
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

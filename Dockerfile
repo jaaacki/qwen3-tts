@@ -43,7 +43,6 @@ COPY --from=builder /install /usr/local
 # Copy application
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 EXPOSE 8000
 

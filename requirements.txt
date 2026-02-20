@@ -12,6 +12,7 @@ uvloop==0.21.0
 httptools==0.6.4
 python-multipart==0.0.12
 orjson==3.10.12
+websockets==13.1
 
 # Audio processing
 soundfile==0.12.1

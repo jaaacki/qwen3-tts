@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — Issue #24: WebSocket streaming endpoint] — 2026-02-20
+### Added
+- **WebSocket streaming endpoint** — `WS /v1/audio/speech/ws` accepts JSON, streams binary PCM per sentence chunk, sends `{"event": "done"}` on completion (#24)
+- **`websockets`** added to Dockerfile pip dependencies (#24)
+
 ## [Unreleased — Issue #20: Async audio encode pipeline] — 2026-02-20
 ### Added
 - **Async audio encode pipeline** — dedicated `_encode_executor` (2 CPU threads) for audio encoding, freeing the event loop during format conversion; applied to both `/speech` and `/clone` endpoints (#20)
