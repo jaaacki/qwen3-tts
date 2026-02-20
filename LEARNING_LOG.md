@@ -278,3 +278,14 @@ The safety argument for enabling TF32 on this model is straightforward: the mode
 Two separate flags are needed: `torch.backends.cuda.matmul.allow_tf32` controls general matrix multiplication, and `torch.backends.cudnn.allow_tf32` controls cuDNN convolution operations. Both default to False in PyTorch. On pre-Ampere GPUs these flags are no-ops — the hardware simply ignores them.
 
 The test strategy uses mock-based reimport rather than `if torch.cuda.is_available()` guards. This ensures tests actually assert on non-CUDA CI machines instead of silently passing. The pattern: reset flags to False, mock `cuda.is_available` to return True, reimport the server module, verify flags became True.
+
+---
+
+## Entry 0013 — Why lifespan over @app.on_event
+**Date**: 2026-02-20
+**Type**: Why this design
+**Related**: #33
+
+FastAPI deprecated `@app.on_event("startup")` and `@app.on_event("shutdown")` in version 0.93.0. The replacement is the lifespan context manager pattern: `@asynccontextmanager async def lifespan(app)`. The yield point separates startup from shutdown — everything before yield runs at startup, everything after runs at shutdown.
+
+The practical advantage is not just suppressing deprecation warnings. The old pattern had separate startup and shutdown functions with no shared scope. With lifespan, variables from the startup section are naturally in scope during teardown. For our server, the immediate benefit is that model unload now runs on graceful shutdown — ensuring clean VRAM release in shared GPU environments where another container might be waiting for memory.
