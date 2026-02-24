@@ -12,6 +12,9 @@ __pycache__/
 *.flac
 *.ogg
 
+# Exception: reference voice WAV files needed for Docker build
+!voices/*.wav
+
 # E2E test generated files
 E2Etest/data/audio/
 E2Etest/reports/
