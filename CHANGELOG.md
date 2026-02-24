@@ -1,39 +1,42 @@
 # Changelog
 
-## [Unreleased — Issue #81: priority queue] — 2026-02-24
+## v0.7.0 — 2026-02-24
+
+Phase 4 Intelligence complete. Issues #81–#83 implemented.
+
+### Added
+- Optional `temperature` and `top_p` fields on `TTSRequest` — passed through to `model.generate()` kwargs for controlling generation diversity (#83)
+- `temperature` and `top_p` Form parameters on `/v1/audio/speech/clone` endpoint (#83)
+- `temperature` and `top_p` JSON fields accepted on WebSocket `/v1/audio/speech/ws` endpoint (#83)
+- `_build_gen_kwargs()` helper to DRY up gen_kwargs construction across all synthesis endpoints (#83)
 
 ### Changed
 - Replaced `asyncio.Semaphore(1)` inference serialization with `PriorityInferQueue` min-heap (#81)
-- WebSocket, SSE, and raw PCM streaming endpoints now run at `PRIORITY_REALTIME=0`
-- REST `/v1/audio/speech` and `/v1/audio/speech/clone` run at `PRIORITY_BATCH=1`
-- Under mixed load, real-time streaming clients are always dispatched before batch REST callers
-
----
-
-## [Unreleased — Issue #82: voice clone prompt cache] — 2026-02-24
-
-### Changed
+- WebSocket, SSE, and raw PCM streaming endpoints now run at `PRIORITY_REALTIME=0` (#81)
+- REST `/v1/audio/speech` and `/v1/audio/speech/clone` run at `PRIORITY_BATCH=1` (#81)
 - Voice clone cache now stores pre-computed speaker embeddings via `model.create_voice_clone_prompt()` instead of raw decoded audio arrays (#82)
-- `_voice_cache` renamed to `_voice_prompt_cache`; `_get_cached_ref_audio()` replaced by `_get_cached_voice_prompt()`
-- `_do_voice_clone()` accepts a pre-computed prompt object instead of raw `(audio, sr)` tuple
-- `POST /cache/clear` now also clears the voice prompt cache, returning `{"audio_cleared": N, "voice_cleared": M}`
+- `_voice_cache` renamed to `_voice_prompt_cache`; `_get_cached_ref_audio()` replaced by `_get_cached_voice_prompt()` (#82)
+- `_do_voice_clone()` accepts a pre-computed prompt object instead of raw `(audio, sr)` tuple (#82)
+- `POST /cache/clear` now also clears the voice prompt cache, returning `{"audio_cleared": N, "voice_cleared": M}` (#82)
+- Replaced 4x repeated inline `gen_kwargs` dict construction with `_build_gen_kwargs()` calls (#83)
+- Fixed variable ordering bug in `/v1/audio/speech/clone` where `_adaptive_max_tokens(text)` was called before `text` was assigned (#83)
+
+### Detail
+
+**#81 Priority inference queue**
+- `PriorityInferQueue` backed by `heapq` stdlib min-heap; `@dataclass(order=True) _InferJob(priority, submit_time)` sort key
+- `PRIORITY_REALTIME=0` for WS/SSE/PCM, `PRIORITY_BATCH=1` for REST — under mixed load real-time streams always run first
+- Queue singleton started from `lifespan()`; asyncio.Lock + asyncio.Event internals; no busy-wait
+
+**#82 Voice clone prompt cache**
+- `create_voice_clone_prompt()` runs speaker encoder once per unique ref audio; repeat callers pay near-zero overhead
+- Cache key: SHA-256 of raw audio bytes; eviction: LRU via OrderedDict, `VOICE_CACHE_MAX` limit
+
+**#83 Generation parameters**
+- `None` means omit from kwargs entirely — model uses defaults; passing `None` explicitly is different from not passing it
+- `_build_gen_kwargs()` centralizes max_new_tokens + conditional temperature/top_p construction
 
 ---
-
-## [Unreleased — Issue #83: expose temperature and top_p] — 2026-02-24
-
-### Added
-- Optional `temperature` and `top_p` fields on `TTSRequest` — passed through to `model.generate()` kwargs for controlling generation diversity
-- `temperature` and `top_p` Form parameters on `/v1/audio/speech/clone` endpoint
-- `temperature` and `top_p` JSON fields accepted on WebSocket `/v1/audio/speech/ws` endpoint
-- `_build_gen_kwargs()` helper to DRY up gen_kwargs construction across all synthesis endpoints
-
-### Changed
-- Replaced 4x repeated inline `gen_kwargs` dict construction with `_build_gen_kwargs()` calls in `/v1/audio/speech`, `/v1/audio/speech/stream`, `/v1/audio/speech/stream/pcm`
-- Fixed variable ordering bug in `/v1/audio/speech/clone` where `_adaptive_max_tokens(text)` was called before `text` was assigned
-
----
-
 
 ## v0.6.0 — 2026-02-20
 

@@ -75,9 +75,9 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 
 Model-grounded: after research into the `qwen-tts` package API, three concrete gaps were identified between model capability and server implementation.
 
-- [ ] #81 Replace inference semaphore with priority queue (WS/SSE/PCM at priority 0, REST at priority 1)
-- [ ] #82 Fix voice clone caching — use `create_voice_clone_prompt()` instead of raw audio arrays
-- [ ] #83 Expose `temperature` and `top_p` in TTSRequest
+- [x] #81 Replace inference semaphore with priority queue (WS/SSE/PCM at priority 0, REST at priority 1)
+- [x] #82 Fix voice clone caching — use `create_voice_clone_prompt()` instead of raw audio arrays
+- [x] #83 Expose `temperature` and `top_p` in TTSRequest
 
 ---
 
@@ -99,4 +99,4 @@ No unplaced items.
 
 ## Current Status
 
-**v0.6.0** — Phase 3 complete. All 36 original issues implemented. Phase 4 (Intelligence) and Phase 5 (Scale) planned — 6 issues across two milestones.
+**v0.7.0** — Phase 4 Intelligence complete. Issues #81–#83 implemented. Phase 5 (Scale) planned — 3 issues: batch inference (#84), gateway/worker mode (#85), quantization (#86).
