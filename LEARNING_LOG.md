@@ -4,6 +4,21 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0014 — Exposing generation parameters: temperature and top_p
+**Date**: 2026-02-24
+**Type**: What just happened
+**Related**: Issue #83 — Expose temperature and top_p in TTSRequest
+
+The Qwen3-TTS model's `generate_custom_voice()` and `generate_voice_clone()` accept standard HuggingFace generation kwargs (`temperature`, `top_p`, etc.) but the server hardcoded only `max_new_tokens`. Clients had no way to control generation diversity.
+
+The fix adds two optional fields to `TTSRequest` (both default to `None`) and a `_build_gen_kwargs()` helper that conditionally includes them in the kwargs dict. When `None`, the key is omitted entirely — the model uses its own defaults, preserving exact backward compatibility. This matters because passing `temperature=None` explicitly to HuggingFace's `generate()` would be different from not passing it at all.
+
+The DRY improvement is incidental but valuable: four endpoints had identical `gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}` lines. The helper centralizes this pattern. Two endpoints (clone and WebSocket) build kwargs inline because they don't use `TTSRequest` — clone uses `Form` params and WebSocket uses raw JSON.
+
+A pre-existing bug was fixed in the clone endpoint: `_adaptive_max_tokens(text)` was called before `text = input.strip()`, using an undefined variable. The reordering to assign `text` first was necessary for correctness regardless of the temperature/top_p feature.
+
+---
+
 ## Entry 0012 — GPU memory pool pre-warming and CUDA allocator tuning
 **Date**: 2026-02-20
 **Type**: Why this design

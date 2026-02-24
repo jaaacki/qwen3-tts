@@ -222,6 +222,8 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
     language: Optional[str] = None
     instruct: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
 
 def _release_gpu_full():
@@ -539,6 +541,16 @@ def _adaptive_max_tokens(text: str) -> int:
     return max(128, min(2048, len(text.split()) * 8))
 
 
+def _build_gen_kwargs(text: str, request: TTSRequest) -> dict:
+    """Build model.generate() kwargs for a synthesis request."""
+    kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+    if request.temperature is not None:
+        kwargs["temperature"] = request.temperature
+    if request.top_p is not None:
+        kwargs["top_p"] = request.top_p
+    return kwargs
+
+
 def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: float = -40.0) -> np.ndarray:
     """Trim leading and trailing silence from audio array."""
     if not VAD_TRIM:
@@ -708,7 +720,7 @@ async def synthesize_speech(request: TTSRequest):
     try:
         language = request.language or detect_language(request.input)
         text = _normalize_text(text)
-        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+        gen_kwargs = _build_gen_kwargs(text, request)
 
         t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
@@ -796,7 +808,7 @@ async def synthesize_speech_stream(request: TTSRequest):
     async def generate():
         for sentence in sentences:
             try:
-                gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+                gen_kwargs = _build_gen_kwargs(sentence, request)
                 loop = asyncio.get_running_loop()
                 async with _infer_semaphore:
                     wavs, sr = await asyncio.wait_for(
@@ -851,6 +863,8 @@ async def clone_voice(
     ref_text: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
     response_format: str = Form("wav"),
+    temperature: Optional[float] = Form(None),
+    top_p: Optional[float] = Form(None),
 ):
     """Voice cloning endpoint - requires a reference audio file."""
     global _queue_depth
@@ -876,9 +890,13 @@ async def clone_voice(
         ref_audio_data, ref_sr = _get_cached_ref_audio(audio_bytes)
 
         language = language or detect_language(input)
-        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
         text = input.strip()
         text = _normalize_text(text)
+        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+        if temperature is not None:
+            gen_kwargs["temperature"] = temperature
+        if top_p is not None:
+            gen_kwargs["top_p"] = top_p
 
         t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
@@ -965,7 +983,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     async def pcm_generator():
         global _last_used
         for sentence in sentences:
-            gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+            gen_kwargs = _build_gen_kwargs(sentence, request)
             loop = asyncio.get_running_loop()
             try:
                 async with _infer_semaphore:
@@ -1021,6 +1039,8 @@ async def ws_synthesize(websocket: WebSocket):
             voice = resolve_voice(data.get("voice"))
             language = data.get("language") or detect_language(text)
             speed = float(data.get("speed", 1.0))
+            ws_temperature = data.get("temperature")
+            ws_top_p = data.get("top_p")
 
             await _ensure_model_loaded()
 
@@ -1030,6 +1050,10 @@ async def ws_synthesize(websocket: WebSocket):
 
             for sentence in sentences:
                 gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+                if ws_temperature is not None:
+                    gen_kwargs["temperature"] = float(ws_temperature)
+                if ws_top_p is not None:
+                    gen_kwargs["top_p"] = float(ws_top_p)
                 loop = asyncio.get_running_loop()
                 async with _infer_semaphore:
                     wavs, sr = await asyncio.wait_for(
