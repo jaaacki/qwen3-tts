@@ -4,6 +4,47 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0017 — Batch inference: draining the queue for free GPU utilization
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #84 — Add batch inference for concurrent synthesis requests
+
+The priority queue (Issue #81) serializes GPU inference, but under concurrent load each request still waits in line for its own dedicated model call. Transformer-based TTS models like Qwen3-TTS support batched inputs natively via `generate_custom_voice(text=[...])`, where multiple texts are padded and processed in a single forward pass. The GPU's parallel compute units are underutilized when processing one short text at a time, so batching N requests into one call yields near-1x inference time instead of Nx.
+
+The implementation drains the priority queue's heap: when the worker picks up a synthesis job and `MAX_BATCH_SIZE > 1`, it pops all pending synthesis jobs (up to `MAX_BATCH_SIZE`) in one lock pass, collects their texts/languages/speakers, and dispatches a single `_do_synthesize_batch()` call. Results fan out: each job's future gets its individual wav. If the batch call fails, all futures receive the same exception. `MAX_BATCH_SIZE` (env var, default 4) caps the drain to prevent excessive padding waste and memory spikes. Setting it to 1 disables batching entirely, falling back to the original single-dispatch path.
+
+The `instruct` parameter is not supported in the batch path because it is per-request and the model's batch API does not support mixed instruct/non-instruct calls. Requests with `instruct` set fall back to single-job dispatch automatically. Voice clone requests are similarly excluded since they use a different model method (`generate_voice_clone`).
+
+---
+
+## Entry 0018 — Gateway/Worker mode: why two processes beat one idle process
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #85 — Add Gateway/Worker mode for minimal idle footprint
+
+The idle RAM problem: even with `IDLE_TIMEOUT` unloading the model from VRAM, the Python process still holds ~1 GB RSS from PyTorch, CUDA runtime, and the loaded server modules. In shared GPU environments where the TTS service may sit idle for hours between requests, that memory is wasted.
+
+The two-process split solves this by separating concerns. `gateway.py` is a minimal FastAPI proxy (~30 MB RSS) that knows nothing about models or inference. It spawns `worker.py` (the full TTS server) as a subprocess only when a request arrives, then kills it after `IDLE_TIMEOUT` seconds of inactivity. When the worker dies, all its memory (Python heap, CUDA context, model weights) is reclaimed by the OS — something that is impossible to achieve within a single Python process due to allocator fragmentation.
+
+The gateway uses `aiohttp.ClientSession` to proxy all HTTP requests transparently to the worker on an internal port (`WORKER_PORT=8001`). A double-checked lock (`_worker_lock`) prevents concurrent request storms from spawning multiple workers. The idle watchdog runs every 30 seconds, checking `_last_used` against `IDLE_TIMEOUT`.
+
+The main trade-off is cold start latency: the first request after an idle kill pays the full model load time (~10-15 seconds). This is acceptable for the target use case (shared GPU, infrequent usage) where memory savings outweigh startup latency.
+
+Note: streaming (SSE) and WebSocket endpoints are not proxied correctly in this initial version — `gateway.py` buffers full responses. These are known limitations documented for a follow-up issue.
+
+---
+
+## Entry 0019 — Quantization: when to trade precision for VRAM
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #86 — Add quantization support (INT8/FP8)
+
+The Qwen3-TTS-0.6B model consumes ~2.4 GB VRAM in bfloat16. On shared GPU environments where multiple services compete for a single card, that footprint matters. INT8 quantization via bitsandbytes (`QUANTIZE=int8`) cuts VRAM roughly in half to ~1.2 GB at the cost of 10-20% slower inference. FP8 via torchao (`QUANTIZE=fp8`) is more aggressive — ~0.8 GB — with minimal speed impact, but only works on Hopper (H100) and newer architectures. We keep bfloat16 as the default because maximum audio quality matters more than VRAM savings for most deployments.
+
+Both `bitsandbytes` and `torchao` are large packages that most users don't need. They're listed in `requirements.txt` as optional and installed with `|| true` in the Dockerfile so builds don't break on CPU-only hosts. The `_resolve_quant_kwargs()` helper validates `QUANTIZE` at model load time — not at request time — so a misconfigured env var fails fast with a clear error message instead of silently producing degraded output or crashing on the first inference call.
+
+---
+
 ## Entry 0016 — Priority inference queue: why a semaphore is not enough
 **Date**: 2026-02-24
 **Type**: What just happened

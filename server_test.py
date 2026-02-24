@@ -1,4 +1,5 @@
 """Tests for server.py - Phase 1 Real-Time + Phase 2 Speed & Quality features."""
+import os
 import sys
 import io
 import hashlib
@@ -793,3 +794,246 @@ class TestPriorityInferQueue:
         assert server.PRIORITY_REALTIME == 0
         assert server.PRIORITY_BATCH == 1
         assert server.PRIORITY_REALTIME < server.PRIORITY_BATCH
+
+
+# --- Issue #86: Quantization support tests ---
+
+
+class TestQuantization:
+    """QUANTIZE env var controls model loading precision via _resolve_quant_kwargs()."""
+
+    def test_no_quantize_returns_bfloat16_no_extras(self):
+        """Empty QUANTIZE env var -> bfloat16, empty extra kwargs."""
+        with patch.object(server, "QUANTIZE", ""):
+            dtype, kwargs = server._resolve_quant_kwargs()
+        assert dtype == torch.bfloat16
+        assert kwargs == {}
+
+    def test_int8_returns_float16_and_load_in_8bit(self):
+        """QUANTIZE=int8 -> float16 dtype, load_in_8bit=True."""
+        mock_bnb = MagicMock()
+        with patch.dict("sys.modules", {"bitsandbytes": mock_bnb}), \
+             patch.object(server, "QUANTIZE", "int8"):
+            dtype, kwargs = server._resolve_quant_kwargs()
+        assert dtype == torch.float16
+        assert kwargs.get("load_in_8bit") is True
+
+    def test_int8_missing_bitsandbytes_raises_importerror(self):
+        """QUANTIZE=int8 without bitsandbytes installed raises ImportError."""
+        with patch.dict("sys.modules", {"bitsandbytes": None}), \
+             patch.object(server, "QUANTIZE", "int8"):
+            with pytest.raises(ImportError, match="bitsandbytes"):
+                server._resolve_quant_kwargs()
+
+    def test_fp8_returns_bfloat16_and_quantization_config(self):
+        """QUANTIZE=fp8 -> bfloat16 dtype, quantization_config in kwargs."""
+        mock_config_cls = MagicMock(name="TorchAoConfig")
+        mock_transformers = MagicMock()
+        mock_transformers.TorchAoConfig = mock_config_cls
+        with patch.dict("sys.modules", {"transformers": mock_transformers}), \
+             patch.object(server, "QUANTIZE", "fp8"):
+            dtype, kwargs = server._resolve_quant_kwargs()
+        assert dtype == torch.bfloat16
+        assert "quantization_config" in kwargs
+        mock_config_cls.assert_called_once_with("fp8_dynamic_activation_fp8_weight")
+
+    def test_unknown_quantize_value_raises_valueerror(self):
+        """Unknown QUANTIZE value raises ValueError with descriptive message."""
+        with patch.object(server, "QUANTIZE", "gguf"):
+            with pytest.raises(ValueError, match="Unknown QUANTIZE"):
+                server._resolve_quant_kwargs()
+
+
+# --- Issue #85: Gateway/Worker mode tests ---
+
+# Mock aiohttp if not installed (it's a Docker-only dependency)
+try:
+    import aiohttp as _aiohttp_check  # noqa: F401
+except ImportError:
+    sys.modules["aiohttp"] = MagicMock()
+
+import gateway  # noqa: E402
+
+
+class TestGateway:
+    """Gateway proxies requests to worker and manages worker subprocess lifecycle."""
+
+    def test_worker_process_none_at_start(self):
+        """_worker_process is None before any request is received."""
+        assert gateway._worker_process is None
+
+    def test_check_idle_kills_worker_after_timeout(self):
+        """_check_idle kills the worker when last_used is older than IDLE_TIMEOUT."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # process is running
+
+        with patch.object(gateway, "_worker_process", mock_proc, create=True), \
+             patch.object(gateway, "_last_used", 0.0, create=True), \
+             patch.object(gateway, "IDLE_TIMEOUT", 120), \
+             patch("time.time", return_value=200.0):
+            asyncio.run(gateway._check_idle())
+
+        mock_proc.kill.assert_called_once()
+
+    def test_check_idle_noop_when_no_worker(self):
+        """_check_idle does nothing when _worker_process is None."""
+        with patch.object(gateway, "_worker_process", None, create=True):
+            asyncio.run(gateway._check_idle())  # should not raise
+
+    def test_check_idle_noop_when_idle_timeout_zero(self):
+        """IDLE_TIMEOUT=0 disables idle killing."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        with patch.object(gateway, "_worker_process", mock_proc, create=True), \
+             patch.object(gateway, "_last_used", 0.0, create=True), \
+             patch.object(gateway, "IDLE_TIMEOUT", 0), \
+             patch("time.time", return_value=99999.0):
+            asyncio.run(gateway._check_idle())
+        mock_proc.kill.assert_not_called()
+
+    def test_check_idle_clears_dead_process(self):
+        """If worker process has already exited, _worker_process is set to None."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # process exited
+        with patch.object(gateway, "_worker_process", mock_proc, create=True):
+            asyncio.run(gateway._check_idle())
+        # Should clear _worker_process without calling kill
+        mock_proc.kill.assert_not_called()
+
+
+# --- Issue #84: Batch inference tests ---
+
+
+class TestBatchInference:
+    """Tests for batch inference dispatching via PriorityInferQueue."""
+
+    def test_batch_key_carried_on_job(self):
+        """_InferJob has batch_key field, default 'single'."""
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        job = server._InferJob(
+            priority=1, submit_time=0.0,
+            future=future, fn=lambda: None,
+        )
+        assert job.batch_key == "single"
+
+        job_batch = server._InferJob(
+            priority=1, submit_time=0.0,
+            future=future, fn=lambda: None,
+            batch_key="synthesis",
+        )
+        assert job_batch.batch_key == "synthesis"
+        loop.close()
+
+    def test_submit_batch_returns_result(self):
+        """Single submit_batch call resolves correctly."""
+        mock_wavs = [np.array([0.1, 0.2], dtype=np.float32)]
+        mock_sr = 24000
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", return_value=(mock_wavs, mock_sr)):
+                with patch.object(server, "MAX_BATCH_SIZE", 4):
+                    result = await queue.submit_batch(
+                        text="hello", language="English",
+                        speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                    )
+            return result
+
+        wavs, sr = asyncio.run(run())
+        assert sr == mock_sr
+        np.testing.assert_array_equal(wavs[0], mock_wavs[0])
+
+    def test_multiple_queued_jobs_batched(self):
+        """3 synthesis jobs submitted together are dispatched as a single batch call."""
+        call_args = {}
+
+        def fake_batch(texts, languages, speakers, gen_kwargs_list):
+            call_args["texts"] = texts
+            call_args["languages"] = languages
+            call_args["speakers"] = speakers
+            wavs = [np.array([0.1 * i], dtype=np.float32) for i in range(len(texts))]
+            return wavs, 24000
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", side_effect=fake_batch):
+                with patch.object(server, "MAX_BATCH_SIZE", 4):
+                    # Submit 3 jobs concurrently — they should all land in the heap
+                    # before the worker drains them
+                    tasks = []
+                    for i in range(3):
+                        t = asyncio.create_task(queue.submit_batch(
+                            text=f"text_{i}", language="English",
+                            speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                        ))
+                        tasks.append(t)
+                    results = await asyncio.gather(*tasks)
+            return results, call_args
+
+        results, captured = asyncio.run(run())
+        # All 3 texts should have been passed to _do_synthesize_batch
+        assert len(captured["texts"]) == 3
+        assert set(captured["texts"]) == {"text_0", "text_1", "text_2"}
+        assert len(results) == 3
+
+    def test_exception_propagates_to_all_futures(self):
+        """If _do_synthesize_batch raises, all futures get the exception."""
+        def exploding_batch(*args, **kwargs):
+            raise RuntimeError("GPU exploded")
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", side_effect=exploding_batch):
+                with patch.object(server, "MAX_BATCH_SIZE", 4):
+                    tasks = []
+                    for i in range(3):
+                        t = asyncio.create_task(queue.submit_batch(
+                            text=f"text_{i}", language="English",
+                            speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                        ))
+                        tasks.append(t)
+
+                    exceptions = []
+                    for t in tasks:
+                        try:
+                            await t
+                        except RuntimeError as e:
+                            exceptions.append(str(e))
+            return exceptions
+
+        exceptions = asyncio.run(run())
+        assert len(exceptions) == 3
+        assert all("GPU exploded" in e for e in exceptions)
+
+    def test_max_batch_size_one_disables_batching(self):
+        """With MAX_BATCH_SIZE=1, submit_batch still works as a batch-of-1."""
+        mock_wavs = [np.array([0.5], dtype=np.float32)]
+        mock_sr = 24000
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", return_value=(mock_wavs, mock_sr)) as mock_batch:
+                with patch.object(server, "MAX_BATCH_SIZE", 1):
+                    result = await queue.submit_batch(
+                        text="hello", language="English",
+                        speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                    )
+            return result, mock_batch.call_count
+
+        (wavs, sr), call_count = asyncio.run(run())
+        assert call_count == 1
+        assert sr == mock_sr
+        np.testing.assert_array_equal(wavs[0], mock_wavs[0])

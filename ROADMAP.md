@@ -85,9 +85,9 @@ Model-grounded: after research into the `qwen-tts` package API, three concrete g
 
 **Vision**: The server handles concurrent load efficiently and runs lean in shared GPU environments.
 
-- [ ] #84 Add batch inference for concurrent synthesis requests (depends on #81)
-- [ ] #85 Add Gateway/Worker mode for minimal idle footprint (~30 MB idle vs ~1 GB)
-- [ ] #86 Add quantization support (INT8/FP8) via bitsandbytes and torchao
+- [x] #84 Add batch inference for concurrent synthesis requests (depends on #81)
+- [x] #85 Add Gateway/Worker mode for minimal idle footprint (~30 MB idle vs ~1 GB)
+- [x] #86 Add quantization support (INT8/FP8) via bitsandbytes and torchao
 
 ---
 
@@ -99,4 +99,4 @@ No unplaced items.
 
 ## Current Status
 
-**v0.7.0** — Phase 4 Intelligence complete. Issues #81–#83 implemented. Phase 5 (Scale) planned — 3 issues: batch inference (#84), gateway/worker mode (#85), quantization (#86).
+**v0.8.0** — Phase 5 Scale complete. Issues #84–#86 implemented. All planned phases complete.

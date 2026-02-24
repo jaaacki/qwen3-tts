@@ -149,6 +149,8 @@ class _InferJob:
     submit_time: float
     future: "asyncio.Future" = field(compare=False)
     fn: "callable" = field(compare=False)
+    batch_key: str = field(default="single", compare=False)
+    batch_args: dict = field(default_factory=dict, compare=False)
 
 
 class PriorityInferQueue:
@@ -172,21 +174,66 @@ class PriorityInferQueue:
                     if not self._heap:
                         self._event.clear()
                         break
-                    job = heapq.heappop(self._heap)
+
+                    top = self._heap[0]
+                    if top.batch_key == "synthesis":
+                        batch_jobs = []
+                        while self._heap and self._heap[0].batch_key == "synthesis" and len(batch_jobs) < MAX_BATCH_SIZE:
+                            batch_jobs.append(heapq.heappop(self._heap))
+                    else:
+                        batch_jobs = None
+                        single_job = heapq.heappop(self._heap)
 
                 loop = asyncio.get_running_loop()
-                try:
-                    result = await loop.run_in_executor(self._infer_executor, job.fn)
-                    if not job.future.done():
-                        job.future.set_result(result)
-                except Exception as exc:
-                    if not job.future.done():
-                        job.future.set_exception(exc)
+
+                if batch_jobs:
+                    texts = [j.batch_args["text"] for j in batch_jobs]
+                    langs = [j.batch_args["language"] for j in batch_jobs]
+                    speakers = [j.batch_args["speaker"] for j in batch_jobs]
+                    kwargs_list = [j.batch_args["gen_kwargs"] for j in batch_jobs]
+                    try:
+                        wavs, srs = await loop.run_in_executor(
+                            self._infer_executor,
+                            lambda: _do_synthesize_batch(texts, langs, speakers, kwargs_list),
+                        )
+                        sr = srs[0] if isinstance(srs, list) else srs
+                        for job, wav in zip(batch_jobs, wavs):
+                            if not job.future.done():
+                                job.future.set_result(([wav], sr))
+                    except Exception as exc:
+                        for job in batch_jobs:
+                            if not job.future.done():
+                                job.future.set_exception(exc)
+                else:
+                    try:
+                        result = await loop.run_in_executor(self._infer_executor, single_job.fn)
+                        if not single_job.future.done():
+                            single_job.future.set_result(result)
+                    except Exception as exc:
+                        if not single_job.future.done():
+                            single_job.future.set_exception(exc)
 
     async def submit(self, fn: callable, priority: int = PRIORITY_BATCH) -> any:
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         job = _InferJob(priority=priority, submit_time=time.monotonic(), future=future, fn=fn)
+        async with self._lock:
+            heapq.heappush(self._heap, job)
+        self._event.set()
+        return await future
+
+    async def submit_batch(self, text: str, language: str, speaker: str, gen_kwargs: dict) -> tuple:
+        """Submit a batchable synthesis job. The worker collects concurrent peers."""
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        job = _InferJob(
+            priority=PRIORITY_BATCH,
+            submit_time=time.monotonic(),
+            future=future,
+            fn=None,
+            batch_key="synthesis",
+            batch_args={"text": text, "language": language, "speaker": speaker, "gen_kwargs": gen_kwargs},
+        )
         async with self._lock:
             heapq.heappush(self._heap, job)
         self._event.set()
@@ -213,6 +260,12 @@ TEXT_NORMALIZE = os.getenv("TEXT_NORMALIZE", "true").lower() in ("true", "1", "y
 # Queue depth limit — 503 when exceeded (0 = unlimited)
 MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "5"))
 _queue_depth = 0
+
+# Quantization mode — "", "int8" (bitsandbytes), or "fp8" (torchao)
+QUANTIZE = os.getenv("QUANTIZE", "").lower()
+
+# Batch inference — max jobs per GPU dispatch (1 = disabled)
+MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "4"))
 
 # Track last request time
 _last_used = 0.0
@@ -293,6 +346,41 @@ def _release_gpu_full():
         torch.cuda.ipc_collect()
 
 
+def _resolve_quant_kwargs() -> tuple[torch.dtype, dict]:
+    """Return (dtype, extra_load_kwargs) based on QUANTIZE env var.
+
+    int8: bitsandbytes LLM.int8() — ~50% VRAM reduction, ~10-20% slower
+    fp8:  torchao FP8 dynamic activation — ~67% VRAM reduction, minimal speed impact on Hopper+
+    """
+    if not QUANTIZE:
+        return torch.bfloat16, {}
+
+    if QUANTIZE == "int8":
+        try:
+            import bitsandbytes  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "bitsandbytes is required for QUANTIZE=int8. "
+                "Install it: pip install bitsandbytes>=0.43.0"
+            )
+        return torch.float16, {"load_in_8bit": True}
+
+    if QUANTIZE == "fp8":
+        try:
+            from transformers import TorchAoConfig
+            quant_config = TorchAoConfig("fp8_dynamic_activation_fp8_weight")
+        except (ImportError, Exception) as exc:
+            raise ImportError(
+                "torchao is required for QUANTIZE=fp8. "
+                "Install it: pip install torchao>=0.5.0"
+            ) from exc
+        return torch.bfloat16, {"quantization_config": quant_config}
+
+    raise ValueError(
+        f"Unknown QUANTIZE value: {QUANTIZE!r}. Must be 'int8', 'fp8', or unset."
+    )
+
+
 def _load_model_sync():
     """Load model into GPU (blocking). Called from async context via lock."""
     global model, loaded_model_id, _last_used
@@ -312,14 +400,19 @@ def _load_model_sync():
         attn_impl = "sdpa"
         print("flash_attention_2 not available, falling back to sdpa")
 
-    print(f"Loading {model_id} (attn={attn_impl})...")
+    dtype, quant_kwargs = _resolve_quant_kwargs()
+    if QUANTIZE:
+        print(f"Loading model with quantization: {QUANTIZE}")
+
+    print(f"Loading {model_id} (attn={attn_impl}, dtype={dtype})...")
     model = Qwen3TTSModel.from_pretrained(
         model_id,
         device_map="cuda" if torch.cuda.is_available() else "cpu",
-        dtype=torch.bfloat16,
+        dtype=dtype,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
         attn_implementation=attn_impl,
+        **quant_kwargs,
     )
 
     # Compile model for faster inference (PyTorch 2.0+)
@@ -691,6 +784,21 @@ def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     return wavs, sr
 
 
+def _do_synthesize_batch(texts: list[str], languages: list[str], speakers: list[str], gen_kwargs_list: list[dict]) -> tuple[list, list]:
+    """Run batched TTS inference. All items share the max max_new_tokens."""
+    max_tokens = max(k.get("max_new_tokens", 2048) for k in gen_kwargs_list)
+    extra = {k: v for k, v in gen_kwargs_list[0].items() if k != "max_new_tokens"}
+    with torch.inference_mode():
+        wavs, sr = model.generate_custom_voice(
+            text=texts,
+            language=languages,
+            speaker=speakers,
+            max_new_tokens=max_tokens,
+            **extra,
+        )
+    return wavs, sr
+
+
 def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
     """Return a cached voice clone prompt, or compute and cache it.
 
@@ -802,13 +910,22 @@ async def synthesize_speech(request: TTSRequest):
 
         t_queue = time.perf_counter()
         t_queue_done = time.perf_counter()
-        wavs, sr = await asyncio.wait_for(
-            _infer_queue.submit(
-                lambda: _do_synthesize(text, language, speaker, gen_kwargs, instruct=request.instruct),
-                priority=PRIORITY_BATCH,
-            ),
-            timeout=REQUEST_TIMEOUT,
-        )
+        if request.instruct:
+            # instruct not supported in batch path — use single dispatch
+            wavs, sr = await asyncio.wait_for(
+                _infer_queue.submit(
+                    lambda: _do_synthesize(text, language, speaker, gen_kwargs, instruct=request.instruct),
+                    priority=PRIORITY_BATCH,
+                ),
+                timeout=REQUEST_TIMEOUT,
+            )
+        else:
+            wavs, sr = await asyncio.wait_for(
+                _infer_queue.submit_batch(
+                    text=text, language=language, speaker=speaker, gen_kwargs=gen_kwargs,
+                ),
+                timeout=REQUEST_TIMEOUT,
+            )
         t_infer_done = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
