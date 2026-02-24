@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased — Issue #84: batch inference] — 2026-02-24
+
+### Added
+- `PriorityInferQueue.submit_batch()` — queues a batchable synthesis job with `batch_key="synthesis"` (#84)
+- `_do_synthesize_batch()` — dispatches multiple texts in a single `model.generate_custom_voice(text=[...])` call (#84)
+- `MAX_BATCH_SIZE` env var (default 4) — controls max jobs per GPU dispatch (#84)
+
+### Changed
+- `PriorityInferQueue._worker()` now drains all pending synthesis jobs up to `MAX_BATCH_SIZE` and dispatches in one GPU call (#84)
+- `synthesize_speech` falls back to single-job path when `instruct` param is set (#84)
+
+---
+
 ## [Unreleased — Issue #85: gateway/worker mode] — 2026-02-24
 
 ### Added

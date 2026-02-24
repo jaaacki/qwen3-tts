@@ -899,3 +899,141 @@ class TestGateway:
             asyncio.run(gateway._check_idle())
         # Should clear _worker_process without calling kill
         mock_proc.kill.assert_not_called()
+
+
+# --- Issue #84: Batch inference tests ---
+
+
+class TestBatchInference:
+    """Tests for batch inference dispatching via PriorityInferQueue."""
+
+    def test_batch_key_carried_on_job(self):
+        """_InferJob has batch_key field, default 'single'."""
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        job = server._InferJob(
+            priority=1, submit_time=0.0,
+            future=future, fn=lambda: None,
+        )
+        assert job.batch_key == "single"
+
+        job_batch = server._InferJob(
+            priority=1, submit_time=0.0,
+            future=future, fn=lambda: None,
+            batch_key="synthesis",
+        )
+        assert job_batch.batch_key == "synthesis"
+        loop.close()
+
+    def test_submit_batch_returns_result(self):
+        """Single submit_batch call resolves correctly."""
+        mock_wavs = [np.array([0.1, 0.2], dtype=np.float32)]
+        mock_sr = 24000
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", return_value=(mock_wavs, mock_sr)):
+                with patch.object(server, "MAX_BATCH_SIZE", 4):
+                    result = await queue.submit_batch(
+                        text="hello", language="English",
+                        speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                    )
+            return result
+
+        wavs, sr = asyncio.run(run())
+        assert sr == mock_sr
+        np.testing.assert_array_equal(wavs[0], mock_wavs[0])
+
+    def test_multiple_queued_jobs_batched(self):
+        """3 synthesis jobs submitted together are dispatched as a single batch call."""
+        call_args = {}
+
+        def fake_batch(texts, languages, speakers, gen_kwargs_list):
+            call_args["texts"] = texts
+            call_args["languages"] = languages
+            call_args["speakers"] = speakers
+            wavs = [np.array([0.1 * i], dtype=np.float32) for i in range(len(texts))]
+            return wavs, 24000
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", side_effect=fake_batch):
+                with patch.object(server, "MAX_BATCH_SIZE", 4):
+                    # Submit 3 jobs concurrently — they should all land in the heap
+                    # before the worker drains them
+                    tasks = []
+                    for i in range(3):
+                        t = asyncio.create_task(queue.submit_batch(
+                            text=f"text_{i}", language="English",
+                            speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                        ))
+                        tasks.append(t)
+                    results = await asyncio.gather(*tasks)
+            return results, call_args
+
+        results, captured = asyncio.run(run())
+        # All 3 texts should have been passed to _do_synthesize_batch
+        assert len(captured["texts"]) == 3
+        assert set(captured["texts"]) == {"text_0", "text_1", "text_2"}
+        assert len(results) == 3
+
+    def test_exception_propagates_to_all_futures(self):
+        """If _do_synthesize_batch raises, all futures get the exception."""
+        def exploding_batch(*args, **kwargs):
+            raise RuntimeError("GPU exploded")
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", side_effect=exploding_batch):
+                with patch.object(server, "MAX_BATCH_SIZE", 4):
+                    tasks = []
+                    for i in range(3):
+                        t = asyncio.create_task(queue.submit_batch(
+                            text=f"text_{i}", language="English",
+                            speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                        ))
+                        tasks.append(t)
+
+                    exceptions = []
+                    for t in tasks:
+                        try:
+                            await t
+                        except RuntimeError as e:
+                            exceptions.append(str(e))
+            return exceptions
+
+        exceptions = asyncio.run(run())
+        assert len(exceptions) == 3
+        assert all("GPU exploded" in e for e in exceptions)
+
+    def test_max_batch_size_one_disables_batching(self):
+        """With MAX_BATCH_SIZE=1, submit_batch still works as a batch-of-1."""
+        mock_wavs = [np.array([0.5], dtype=np.float32)]
+        mock_sr = 24000
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_do_synthesize_batch", return_value=(mock_wavs, mock_sr)) as mock_batch:
+                with patch.object(server, "MAX_BATCH_SIZE", 1):
+                    result = await queue.submit_batch(
+                        text="hello", language="English",
+                        speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                    )
+            return result, mock_batch.call_count
+
+        (wavs, sr), call_count = asyncio.run(run())
+        assert call_count == 1
+        assert sr == mock_sr
+        np.testing.assert_array_equal(wavs[0], mock_wavs[0])

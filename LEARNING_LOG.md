@@ -4,6 +4,19 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0017 — Batch inference: draining the queue for free GPU utilization
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #84 — Add batch inference for concurrent synthesis requests
+
+The priority queue (Issue #81) serializes GPU inference, but under concurrent load each request still waits in line for its own dedicated model call. Transformer-based TTS models like Qwen3-TTS support batched inputs natively via `generate_custom_voice(text=[...])`, where multiple texts are padded and processed in a single forward pass. The GPU's parallel compute units are underutilized when processing one short text at a time, so batching N requests into one call yields near-1x inference time instead of Nx.
+
+The implementation drains the priority queue's heap: when the worker picks up a synthesis job and `MAX_BATCH_SIZE > 1`, it pops all pending synthesis jobs (up to `MAX_BATCH_SIZE`) in one lock pass, collects their texts/languages/speakers, and dispatches a single `_do_synthesize_batch()` call. Results fan out: each job's future gets its individual wav. If the batch call fails, all futures receive the same exception. `MAX_BATCH_SIZE` (env var, default 4) caps the drain to prevent excessive padding waste and memory spikes. Setting it to 1 disables batching entirely, falling back to the original single-dispatch path.
+
+The `instruct` parameter is not supported in the batch path because it is per-request and the model's batch API does not support mixed instruct/non-instruct calls. Requests with `instruct` set fall back to single-job dispatch automatically. Voice clone requests are similarly excluded since they use a different model method (`generate_voice_clone`).
+
+---
+
 ## Entry 0018 — Gateway/Worker mode: why two processes beat one idle process
 **Date**: 2026-02-24
 **Type**: Why this design
