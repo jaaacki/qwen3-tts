@@ -910,26 +910,24 @@ class TestBatchInference:
         assert all("GPU exploded" in e for e in exceptions)
 
     def test_max_batch_size_one_disables_batching(self):
-        """With MAX_BATCH_SIZE=1, synthesis jobs use single-job path."""
-        single_called = []
-
-        def track_single():
-            single_called.append(True)
-            return ([np.array([0.1], dtype=np.float32)], 24000)
+        """With MAX_BATCH_SIZE=1, submit_batch still works as a batch-of-1."""
+        mock_wavs = [np.array([0.5], dtype=np.float32)]
+        mock_sr = 24000
 
         async def run():
             queue = server.PriorityInferQueue()
             queue._infer_executor = ThreadPoolExecutor(max_workers=1)
             queue.start()
 
-            with patch.object(server, "MAX_BATCH_SIZE", 1):
-                # With MAX_BATCH_SIZE=1, submit_batch still creates a job with
-                # batch_key="synthesis", but the worker should fall to single path.
-                # Since fn=None for batch jobs, the single path would fail.
-                # Instead, test that submit (single path) still works.
-                result = await queue.submit(track_single, priority=1)
-            return result
+            with patch.object(server, "_do_synthesize_batch", return_value=(mock_wavs, mock_sr)) as mock_batch:
+                with patch.object(server, "MAX_BATCH_SIZE", 1):
+                    result = await queue.submit_batch(
+                        text="hello", language="English",
+                        speaker="vivian", gen_kwargs={"max_new_tokens": 256},
+                    )
+            return result, mock_batch.call_count
 
-        result = asyncio.run(run())
-        assert len(single_called) == 1
-        assert result == ([np.array([0.1], dtype=np.float32)], 24000)
+        (wavs, sr), call_count = asyncio.run(run())
+        assert call_count == 1
+        assert sr == mock_sr
+        np.testing.assert_array_equal(wavs[0], mock_wavs[0])

@@ -176,7 +176,7 @@ class PriorityInferQueue:
                         break
 
                     top = self._heap[0]
-                    if top.batch_key == "synthesis" and MAX_BATCH_SIZE > 1:
+                    if top.batch_key == "synthesis":
                         batch_jobs = []
                         while self._heap and self._heap[0].batch_key == "synthesis" and len(batch_jobs) < MAX_BATCH_SIZE:
                             batch_jobs.append(heapq.heappop(self._heap))
