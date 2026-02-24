@@ -67,12 +67,36 @@ Caching and codec work unlocks efficient streaming. System-level tuning reduces 
 
 ---
 
+---
+
+## Phase 4 — Intelligence (v0.7.0)
+
+**Vision**: The server fully exploits what the Qwen3-TTS model can actually do — real-time clients are never starved, repeat voice-clone callers pay nothing, and generation parameters are in client hands.
+
+Model-grounded: after research into the `qwen-tts` package API, three concrete gaps were identified between model capability and server implementation.
+
+- [ ] #81 Replace inference semaphore with priority queue (WS/SSE/PCM at priority 0, REST at priority 1)
+- [ ] #82 Fix voice clone caching — use `create_voice_clone_prompt()` instead of raw audio arrays
+- [ ] #83 Expose `temperature` and `top_p` in TTSRequest
+
+---
+
+## Phase 5 — Scale (v0.8.0)
+
+**Vision**: The server handles concurrent load efficiently and runs lean in shared GPU environments.
+
+- [ ] #84 Add batch inference for concurrent synthesis requests (depends on #81)
+- [ ] #85 Add Gateway/Worker mode for minimal idle footprint (~30 MB idle vs ~1 GB)
+- [ ] #86 Add quantization support (INT8/FP8) via bitsandbytes and torchao
+
+---
+
 ## Backlog
 
-No unplaced items. All improvements from the initial analysis have been assigned to a phase.
+No unplaced items.
 
 ---
 
 ## Current Status
 
-**v0.6.0** — Roadmap complete. All 36 issues implemented across 3 phases. The server is production-grade with real-time streaming, GPU-optimized inference, audio/voice caching, structured observability (Prometheus, JSON logging), and full protocol support (HTTP/1.1, HTTP/2, WebSocket, Unix socket).
+**v0.6.0** — Phase 3 complete. All 36 original issues implemented. Phase 4 (Intelligence) and Phase 5 (Scale) planned — 6 issues across two milestones.
