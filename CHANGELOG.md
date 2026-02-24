@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.9.0 — 2026-02-24
+
+Logging migration from stdlib to loguru.
+
+### Changed
+- Replaced stdlib `logging` + `JsonFormatter` with loguru — all 22 `print()` calls and 2 `logger.info()` calls converted to structured `logger.bind(...).level("message")` calls
+- All log output now routed through loguru, including uvicorn/FastAPI stdlib logs via `_InterceptHandler`
+- JSON output schema unchanged: `{"timestamp", "level", "message", "logger", ...extra_fields}`
+- Log levels properly assigned: `debug` for warmup details, `info` for lifecycle events, `warning` for fallbacks, `success` for milestones
+
+### Fixed
+- `/v1/audio/speech/clone` structured log fields were silently dropped (used `extra={}` without `extra_fields` wrapper)
+
+### Added
+- `LOG_LEVEL` env var (default `INFO`) — controls minimum log level (DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL)
+- `loguru>=0.7.0` dependency in requirements.txt
+
+---
+
 ## v0.8.1 — 2026-02-24
 
 E2E test suite fixes — first successful full run.

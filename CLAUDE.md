@@ -96,6 +96,7 @@ Note: Clone tests are skipped — the CustomVoice model does not support voice c
 | `TORCH_COMPILE` | `true` | Enable `torch.compile` on the model |
 | `PROMETHEUS_ENABLED` | `true` | Expose `/metrics` endpoint |
 | `LOG_FORMAT` | `json` | `json` or `text` log format |
+| `LOG_LEVEL` | `INFO` | Minimum log level (DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL) |
 | `TEXT_NORMALIZE` | `true` | Expand numbers, currency, abbreviations |
 | `MAX_QUEUE_DEPTH` | `5` | 503 early rejection threshold (0 = unlimited) |
 | `AUDIO_CACHE_MAX` | `256` | Max cached audio outputs (0 = disabled) |

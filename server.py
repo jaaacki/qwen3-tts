@@ -19,11 +19,12 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
 import logging
+import sys
 import base64
 import heapq
 from dataclasses import dataclass, field
 
-logger = logging.getLogger("qwen3-tts")
+from loguru import logger
 
 try:
     import pyrubberband as _pyrubberband
@@ -53,39 +54,53 @@ if PROMETHEUS_ENABLED:
 else:
     _prometheus_available = False
 
-# Structured JSON logging
+# Structured logging via loguru
 LOG_FORMAT = os.getenv("LOG_FORMAT", "json")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
-class JsonFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
-            "timestamp": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S"),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "logger": record.name,
-        }
-        # Include extra fields passed via extra= kwarg
-        if hasattr(record, "extra_fields"):
-            log_obj.update(record.extra_fields)
-        return json.dumps(log_obj)
+def _json_sink(message):
+    """Flat JSON sink matching previous JsonFormatter schema."""
+    record = message.record
+    log_obj = {
+        "timestamp": record["time"].strftime("%Y-%m-%dT%H:%M:%S"),
+        "level": record["level"].name,
+        "message": record["message"],
+        "logger": record["name"] or "qwen3-tts",
+    }
+    log_obj.update(record["extra"])
+    print(json.dumps(log_obj, default=str), file=sys.stderr, flush=True)
 
 
-def _setup_logging():
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
+class _InterceptHandler(logging.Handler):
+    """Route stdlib logging (uvicorn/fastapi) → loguru."""
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        frame, depth = sys._getframe(6), 6
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+
+def _configure_logging():
+    logger.remove()  # remove default stderr handler
     if LOG_FORMAT == "json":
-        handler.setFormatter(JsonFormatter())
+        logger.add(_json_sink, level=LOG_LEVEL, format="{message}")
     else:
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s %(message)s"
-        ))
-    root.handlers = [handler]
+        logger.add(
+            sys.stderr,
+            level=LOG_LEVEL,
+            format="<green>{time:YYYY-MM-DDTHH:mm:ss}</green> <level>{level:<8}</level> <cyan>qwen3-tts</cyan> {message}",
+        )
+    # Intercept uvicorn / fastapi stdlib logs
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
 
-_setup_logging()
-logger = logging.getLogger("qwen3-tts")
+_configure_logging()
 
 try:
     from pydub import AudioSegment as _PydubAudioSegment
@@ -117,13 +132,13 @@ async def lifespan(app):
     _set_cpu_affinity()
     asyncio.create_task(_idle_watchdog())
     if PRELOAD_MODEL:
-        print("PRELOAD_MODEL=true: loading model at startup")
+        logger.info("Loading model at startup (PRELOAD_MODEL=true)")
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_infer_executor, _load_model_sync)
-    print("Server started")
+    logger.info("Server started")
     yield
     # Shutdown
-    print("Server shutting down")
+    logger.info("Server shutting down")
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(_infer_executor, _unload_model_sync)
 
@@ -398,13 +413,13 @@ def _load_model_sync():
         attn_impl = "flash_attention_2"
     except ImportError:
         attn_impl = "sdpa"
-        print("flash_attention_2 not available, falling back to sdpa")
+        logger.warning("flash_attention_2 not available, falling back to sdpa")
 
     dtype, quant_kwargs = _resolve_quant_kwargs()
     if QUANTIZE:
-        print(f"Loading model with quantization: {QUANTIZE}")
+        logger.bind(quantize=QUANTIZE).info("Loading model with quantization")
 
-    print(f"Loading {model_id} (attn={attn_impl}, dtype={dtype})...")
+    logger.bind(model_id=model_id, attn=attn_impl, dtype=str(dtype)).info("Loading model")
     model = Qwen3TTSModel.from_pretrained(
         model_id,
         device_map="cuda" if torch.cuda.is_available() else "cpu",
@@ -419,13 +434,13 @@ def _load_model_sync():
     if os.getenv("TORCH_COMPILE", "true").lower() == "true":
         try:
             model.model = torch.compile(model.model, mode="reduce-overhead", fullgraph=False)
-            print("torch.compile enabled on model (mode=reduce-overhead)")
+            logger.success("torch.compile enabled (mode=reduce-overhead)")
         except Exception as e:
-            print(f"torch.compile not available or failed: {e}")
+            logger.warning("torch.compile not available or failed: {}", e)
 
     # Multi-length warmup to pre-cache CUDA kernels for different input sizes
     if torch.cuda.is_available():
-        print("Warming up GPU with multi-length synthesis...")
+        logger.info("Warming up GPU with multi-length synthesis")
         warmup_texts = [
             "Hello.",                                       # ~5 tokens — short prompt path
             "Hello, how are you doing today?",              # ~20 tokens — medium
@@ -440,30 +455,30 @@ def _load_model_sync():
                         speaker="vivian",
                         max_new_tokens=256,
                     )
-                print(f"  Warmup: synthesized {len(text)} chars")
+                logger.bind(chars=len(text)).debug("Warmup synthesis complete")
             except Exception as e:
-                print(f"  Warmup failed for '{text[:20]}...': {e}")
+                logger.bind(text_preview=text[:20]).warning("Warmup synthesis failed: {}", e)
         # Clear warmup allocations so steady-state VRAM is clean
         _release_gpu_full()
 
         # Pre-warm CUDA memory pool — allocate and free a large tensor so the
         # allocator pre-reserves a contiguous block, reducing first-request jitter
-        print("Pre-warming CUDA memory pool...")
+        logger.info("Pre-warming CUDA memory pool")
         try:
             dummy = torch.empty(64 * 1024 * 1024, dtype=torch.bfloat16, device="cuda")
             del dummy
-            print("  Allocated and freed 128 MB dummy tensor")
+            logger.debug("CUDA pool pre-warmed (128 MB dummy tensor)")
         except Exception as e:
-            print(f"  CUDA pool pre-warm failed: {e}")
+            logger.warning("CUDA pool pre-warm failed: {}", e)
 
     _last_used = time.time()
     if _prometheus_available:
         tts_model_loaded.set(1)
-    print(f"Model loaded: {model_id}")
+    logger.bind(model_id=model_id).success("Model loaded")
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
         reserved = torch.cuda.memory_reserved() / 1024**2
-        print(f"  GPU Allocated: {allocated:.0f} MB, Reserved: {reserved:.0f} MB")
+        logger.bind(gpu_allocated_mb=round(allocated), gpu_reserved_mb=round(reserved)).info("GPU memory after load")
 
 
 def _unload_model_sync():
@@ -473,7 +488,7 @@ def _unload_model_sync():
     if model is None:
         return
 
-    print("Unloading model (idle timeout)...")
+    logger.info("Unloading model (idle timeout)")
     del model
     model = None
     if _prometheus_available:
@@ -483,7 +498,7 @@ def _unload_model_sync():
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
         reserved = torch.cuda.memory_reserved() / 1024**2
-        print(f"Model unloaded. GPU: Allocated: {allocated:.0f} MB, Reserved: {reserved:.0f} MB")
+        logger.bind(gpu_allocated_mb=round(allocated), gpu_reserved_mb=round(reserved)).info("Model unloaded")
 
 
 async def _ensure_model_loaded():
@@ -539,9 +554,9 @@ def _set_cpu_affinity():
     try:
         cores = _parse_cpu_cores(affinity_cores)
         os.sched_setaffinity(0, cores)
-        print(f"CPU affinity set: cores {sorted(cores)}")
+        logger.bind(cores=sorted(cores)).info("CPU affinity set")
     except Exception as e:
-        print(f"Could not set CPU affinity: {e}")
+        logger.warning("Could not set CPU affinity: {}", e)
 
 
 @app.get("/health")
@@ -931,21 +946,18 @@ async def synthesize_speech(request: TTSRequest):
         )
         t_encode_done = time.perf_counter()
 
-        logger.info(
-            "synthesis_complete",
-            extra={"extra_fields": {
-                "request_id": request_id,
-                "endpoint": "/v1/audio/speech",
-                "voice": speaker,
-                "language": language,
-                "chars": len(text),
-                "format": request.response_format,
-                "queue_ms": round((t_queue_done - t_queue) * 1000),
-                "infer_ms": round((t_infer_done - t_queue_done) * 1000),
-                "encode_ms": round((t_encode_done - t_infer_done) * 1000),
-                "total_ms": round((t_encode_done - t_start) * 1000),
-            }},
-        )
+        logger.bind(
+            request_id=request_id,
+            endpoint="/v1/audio/speech",
+            voice=speaker,
+            language=language,
+            chars=len(text),
+            format=request.response_format,
+            queue_ms=round((t_queue_done - t_queue) * 1000),
+            infer_ms=round((t_infer_done - t_queue_done) * 1000),
+            encode_ms=round((t_encode_done - t_infer_done) * 1000),
+            total_ms=round((t_encode_done - t_start) * 1000),
+        ).info("synthesis_complete")
 
         _set_audio_cache(cache_key, audio_bytes, content_type)
 
@@ -1106,19 +1118,16 @@ async def clone_voice(
         )
         t_end = time.perf_counter()
 
-        logger.info(
-            "request_complete",
-            extra={
-                "endpoint": "/v1/audio/speech/clone",
-                "queue_ms": round((t_infer_start - t_queue) * 1000, 1),
-                "inference_ms": round((t_infer_end - t_infer_start) * 1000, 1),
-                "encode_ms": round((t_end - t_infer_end) * 1000, 1),
-                "total_ms": round((t_end - t_start) * 1000, 1),
-                "chars": len(text),
-                "format": response_format,
-                "language": language,
-            },
-        )
+        logger.bind(
+            endpoint="/v1/audio/speech/clone",
+            queue_ms=round((t_infer_start - t_queue) * 1000, 1),
+            inference_ms=round((t_infer_end - t_infer_start) * 1000, 1),
+            encode_ms=round((t_end - t_infer_end) * 1000, 1),
+            total_ms=round((t_end - t_start) * 1000, 1),
+            chars=len(text),
+            format=response_format,
+            language=language,
+        ).info("request_complete")
 
         return Response(
             content=audio_bytes_out,
