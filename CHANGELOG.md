@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.8.1 — 2026-02-24
+
+E2E test suite fixes — first successful full run.
+
+### Fixed
+- Docker build: `accelerate==1.1.1` → `1.12.0` to match qwen-tts dependency (#94)
+- Dockerfile: multi-stage COPY to `/opt/conda/` instead of `/usr/local/` for conda-based base image (#94)
+- Dockerfile: removed `torchao` from main deps — incompatible with both torch 2.5.x and transformers 4.57.3 (#95)
+- `_load_model_sync()`: removed `import torch._dynamo` that shadowed global `torch` binding, causing `UnboundLocalError` on every model load (#96)
+- Queue depth counter: wrapped cache-hit early-return path in `try/finally` so `_queue_depth` always decrements (#97)
+- Unknown voice names now return 400 with valid voice list instead of passing through to model and crashing with 500 (#99)
+- Opus format content-type changed from `audio/opus` to `audio/ogg` to match OpenAI API convention (#102)
+
+### Removed
+- `_trim_silence()` / `VAD_TRIM` env var — VAD is wrong tool for TTS output; synthesized audio doesn't need voice activity detection (#100)
+
+### Changed (E2E tests)
+- WAV duration parser walks RIFF chunks instead of assuming 44-byte header (#98)
+- SSE audio event test matches server's raw base64 format (#101)
+- Clone inference tests skipped when model doesn't support voice cloning (#103)
+
+---
+
 ## v0.8.0 — 2026-02-24
 
 Phase 5 Scale complete. Issues #84–#86 implemented.
