@@ -20,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 import scipy.signal as scipy_signal
 import logging
 import base64
+import heapq
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("qwen3-tts")
 
@@ -109,6 +111,7 @@ PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "false").lower() in ("true", "1")
 @asynccontextmanager
 async def lifespan(app):
     # Startup
+    _infer_queue.start()
     if _prometheus_available:
         Instrumentator().instrument(app).expose(app)
     _set_cpu_affinity()
@@ -135,8 +138,62 @@ _infer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-infe
 # CPU executor for audio encoding — runs in parallel with GPU inference
 _encode_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts-encode")
 
-# Semaphore to serialize GPU inference — prevents OOM with concurrent requests
-_infer_semaphore = asyncio.Semaphore(1)
+# Priority constants for inference queue
+PRIORITY_REALTIME = 0   # streaming clients — WS, SSE, PCM
+PRIORITY_BATCH    = 1   # buffered clients — REST /speech, /clone
+
+
+@dataclass(order=True)
+class _InferJob:
+    priority: int
+    submit_time: float
+    future: "asyncio.Future" = field(compare=False)
+    fn: "callable" = field(compare=False)
+
+
+class PriorityInferQueue:
+    """Min-heap inference queue. Lower priority number = runs sooner."""
+
+    def __init__(self):
+        self._heap: list = []
+        self._lock = asyncio.Lock()
+        self._event = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._infer_executor = _infer_executor
+
+    def start(self):
+        self._task = asyncio.create_task(self._worker())
+
+    async def _worker(self):
+        while True:
+            await self._event.wait()
+            while True:
+                async with self._lock:
+                    if not self._heap:
+                        self._event.clear()
+                        break
+                    job = heapq.heappop(self._heap)
+
+                loop = asyncio.get_running_loop()
+                try:
+                    result = await loop.run_in_executor(self._infer_executor, job.fn)
+                    if not job.future.done():
+                        job.future.set_result(result)
+                except Exception as exc:
+                    if not job.future.done():
+                        job.future.set_exception(exc)
+
+    async def submit(self, fn: callable, priority: int = PRIORITY_BATCH) -> any:
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        job = _InferJob(priority=priority, submit_time=time.monotonic(), future=future, fn=fn)
+        async with self._lock:
+            heapq.heappush(self._heap, job)
+        self._event.set()
+        return await future
+
+
+_infer_queue = PriorityInferQueue()
 
 # Lock to prevent concurrent load/unload
 _model_lock = asyncio.Lock()
@@ -186,9 +243,11 @@ def _set_audio_cache(key: str, data: bytes, content_type: str) -> None:
         _audio_cache.popitem(last=False)
     _audio_cache[key] = (data, content_type)
 
-# Voice prompt cache — caches processed reference audio by content hash
+# Voice prompt cache — caches speaker embeddings by reference audio content hash
+# Uses model.create_voice_clone_prompt() to precompute the embedding once,
+# so repeat clone requests skip the encoder pass entirely.
 VOICE_CACHE_MAX = int(os.getenv("VOICE_CACHE_MAX", "32"))
-_voice_cache: OrderedDict[str, tuple[np.ndarray, int]] = OrderedDict()
+_voice_prompt_cache: OrderedDict = OrderedDict()
 _voice_cache_hits = 0
 
 # Map OpenAI-style voice names to Qwen3-TTS speakers
@@ -222,6 +281,8 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
     language: Optional[str] = None
     instruct: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
 
 def _release_gpu_full():
@@ -410,7 +471,7 @@ async def health():
         "voices": list(VOICE_MAP.keys()),
         "audio_cache_size": len(_audio_cache),
         "audio_cache_max": _AUDIO_CACHE_MAX,
-        "voice_cache_size": len(_voice_cache),
+        "voice_cache_size": len(_voice_prompt_cache),
         "voice_cache_max": VOICE_CACHE_MAX,
         "voice_cache_hits": _voice_cache_hits,
         **gpu_info,
@@ -419,10 +480,12 @@ async def health():
 
 @app.post("/cache/clear")
 async def clear_cache():
-    """Clear the audio output cache."""
-    count = len(_audio_cache)
+    """Clear the audio output cache and voice prompt cache."""
+    audio_count = len(_audio_cache)
+    voice_count = len(_voice_prompt_cache)
     _audio_cache.clear()
-    return {"cleared": count}
+    _voice_prompt_cache.clear()
+    return {"audio_cleared": audio_count, "voice_cleared": voice_count}
 
 
 def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format: str) -> tuple[bytes, str]:
@@ -539,6 +602,16 @@ def _adaptive_max_tokens(text: str) -> int:
     return max(128, min(2048, len(text.split()) * 8))
 
 
+def _build_gen_kwargs(text: str, request: TTSRequest) -> dict:
+    """Build model.generate() kwargs for a synthesis request."""
+    kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+    if request.temperature is not None:
+        kwargs["temperature"] = request.temperature
+    if request.top_p is not None:
+        kwargs["top_p"] = request.top_p
+    return kwargs
+
+
 def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: float = -40.0) -> np.ndarray:
     """Trim leading and trailing silence from audio array."""
     if not VAD_TRIM:
@@ -618,40 +691,56 @@ def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     return wavs, sr
 
 
-def _get_cached_ref_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
-    """Get processed reference audio from cache or process and cache it."""
+def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
+    """Return a cached voice clone prompt, or compute and cache it.
+
+    Uses model.create_voice_clone_prompt() to pre-compute the speaker embedding
+    from reference audio. The returned prompt object can be reused across
+    generate_voice_clone() calls, skipping the encoder pass entirely.
+    """
     global _voice_cache_hits
-    if VOICE_CACHE_MAX <= 0:
-        ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
-        if len(ref_audio_data.shape) > 1:
-            ref_audio_data = ref_audio_data.mean(axis=1)
-        return ref_audio_data, ref_sr
 
     cache_key = hashlib.sha256(audio_bytes).hexdigest()
-    if cache_key in _voice_cache:
-        _voice_cache_hits += 1
-        _voice_cache.move_to_end(cache_key)
-        return _voice_cache[cache_key]
 
+    if VOICE_CACHE_MAX > 0 and cache_key in _voice_prompt_cache:
+        _voice_cache_hits += 1
+        _voice_prompt_cache.move_to_end(cache_key)
+        return _voice_prompt_cache[cache_key]
+
+    # Decode audio to pass to create_voice_clone_prompt
     ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
     if len(ref_audio_data.shape) > 1:
         ref_audio_data = ref_audio_data.mean(axis=1)
 
-    _voice_cache[cache_key] = (ref_audio_data, ref_sr)
-    while len(_voice_cache) > VOICE_CACHE_MAX:
-        _voice_cache.popitem(last=False)
+    # TODO: verify API with: docker compose run --rm qwen3-tts python3 -c \
+    #   "from qwen_tts import Qwen3TTSModel; import inspect; \
+    #    print(inspect.signature(Qwen3TTSModel.create_voice_clone_prompt))"
+    prompt = model.create_voice_clone_prompt(
+        ref_audio=(ref_audio_data, ref_sr),
+        ref_text=ref_text,
+    )
 
-    return ref_audio_data, ref_sr
+    if VOICE_CACHE_MAX > 0:
+        _voice_prompt_cache[cache_key] = prompt
+        while len(_voice_prompt_cache) > VOICE_CACHE_MAX:
+            _voice_prompt_cache.popitem(last=False)
+
+    return prompt
 
 
-def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
-    """Run voice clone inference. No per-request GC — let CUDA reuse cached allocations."""
+def _do_voice_clone(text, language, ref_prompt, gen_kwargs):
+    """Run voice clone inference using a pre-computed voice prompt.
+
+    No per-request GC — let CUDA reuse cached allocations.
+    """
     with torch.inference_mode():
+        # TODO: verify kwarg name with: docker compose run --rm qwen3-tts python3 -c \
+        #   "from qwen_tts import Qwen3TTSModel; import inspect; \
+        #    print(inspect.signature(Qwen3TTSModel.generate_voice_clone))"
         wavs, sr = model.generate_voice_clone(
             text=text,
             language=language,
-            ref_audio=ref_audio,
-            ref_text=ref_text,
+            ref_prompt=ref_prompt,
             **gen_kwargs,
         )
     return wavs, sr
@@ -708,19 +797,17 @@ async def synthesize_speech(request: TTSRequest):
     try:
         language = request.language or detect_language(request.input)
         text = _normalize_text(text)
-        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+        gen_kwargs = _build_gen_kwargs(text, request)
 
         t_queue = time.perf_counter()
-        loop = asyncio.get_running_loop()
-        async with _infer_semaphore:
-            t_queue_done = time.perf_counter()
-            wavs, sr = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _infer_executor,
-                    lambda: _do_synthesize(text, language, speaker, gen_kwargs, instruct=request.instruct)
-                ),
-                timeout=REQUEST_TIMEOUT
-            )
+        t_queue_done = time.perf_counter()
+        wavs, sr = await asyncio.wait_for(
+            _infer_queue.submit(
+                lambda: _do_synthesize(text, language, speaker, gen_kwargs, instruct=request.instruct),
+                priority=PRIORITY_BATCH,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
         t_infer_done = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
@@ -796,19 +883,17 @@ async def synthesize_speech_stream(request: TTSRequest):
     async def generate():
         for sentence in sentences:
             try:
-                gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
-                loop = asyncio.get_running_loop()
-                async with _infer_semaphore:
-                    wavs, sr = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            _infer_executor,
-                            lambda s=sentence: _do_synthesize(
-                                s, language, speaker, gen_kwargs,
-                                instruct=request.instruct,
-                            )
+                gen_kwargs = _build_gen_kwargs(sentence, request)
+                wavs, sr = await asyncio.wait_for(
+                    _infer_queue.submit(
+                        lambda s=sentence: _do_synthesize(
+                            s, language, speaker, gen_kwargs,
+                            instruct=request.instruct,
                         ),
-                        timeout=REQUEST_TIMEOUT,
-                    )
+                        priority=PRIORITY_REALTIME,
+                    ),
+                    timeout=REQUEST_TIMEOUT,
+                )
 
                 audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
                 if audio_data.ndim > 1:
@@ -851,6 +936,8 @@ async def clone_voice(
     ref_text: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
     response_format: str = Form("wav"),
+    temperature: Optional[float] = Form(None),
+    top_p: Optional[float] = Form(None),
 ):
     """Voice cloning endpoint - requires a reference audio file."""
     global _queue_depth
@@ -871,32 +958,35 @@ async def clone_voice(
 
     _queue_depth += 1
     try:
-        # Read and cache reference audio
+        # Read reference audio and compute/cache speaker embedding
         audio_bytes = await file.read()
-        ref_audio_data, ref_sr = _get_cached_ref_audio(audio_bytes)
-
-        language = language or detect_language(input)
-        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
         text = input.strip()
+        language = language or detect_language(text)
         text = _normalize_text(text)
+        gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
+        if temperature is not None:
+            gen_kwargs["temperature"] = temperature
+        if top_p is not None:
+            gen_kwargs["top_p"] = top_p
+
+        ref_prompt = _get_cached_voice_prompt(
+            audio_bytes, ref_text.strip() if ref_text else None
+        )
 
         t_queue = time.perf_counter()
-        loop = asyncio.get_running_loop()
-        async with _infer_semaphore:
-            t_infer_start = time.perf_counter()
-            wavs, sr = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _infer_executor,
-                    lambda: _do_voice_clone(
-                        text,
-                        language,
-                        (ref_audio_data, ref_sr),
-                        ref_text.strip() if ref_text else None,
-                        gen_kwargs,
-                    )
+        t_infer_start = time.perf_counter()
+        wavs, sr = await asyncio.wait_for(
+            _infer_queue.submit(
+                lambda: _do_voice_clone(
+                    text,
+                    language,
+                    ref_prompt,
+                    gen_kwargs,
                 ),
-                timeout=REQUEST_TIMEOUT
-            )
+                priority=PRIORITY_BATCH,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
         t_infer_end = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
@@ -965,19 +1055,17 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     async def pcm_generator():
         global _last_used
         for sentence in sentences:
-            gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
-            loop = asyncio.get_running_loop()
+            gen_kwargs = _build_gen_kwargs(sentence, request)
             try:
-                async with _infer_semaphore:
-                    wavs, sr = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            _infer_executor,
-                            lambda s=sentence: _do_synthesize(
-                                s, language, speaker, gen_kwargs
-                            ),
+                wavs, sr = await asyncio.wait_for(
+                    _infer_queue.submit(
+                        lambda s=sentence: _do_synthesize(
+                            s, language, speaker, gen_kwargs
                         ),
-                        timeout=REQUEST_TIMEOUT,
-                    )
+                        priority=PRIORITY_REALTIME,
+                    ),
+                    timeout=REQUEST_TIMEOUT,
+                )
                 _last_used = time.time()
                 audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
                 if audio_data.ndim > 1:
@@ -1021,6 +1109,8 @@ async def ws_synthesize(websocket: WebSocket):
             voice = resolve_voice(data.get("voice"))
             language = data.get("language") or detect_language(text)
             speed = float(data.get("speed", 1.0))
+            ws_temperature = data.get("temperature")
+            ws_top_p = data.get("top_p")
 
             await _ensure_model_loaded()
 
@@ -1030,15 +1120,17 @@ async def ws_synthesize(websocket: WebSocket):
 
             for sentence in sentences:
                 gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
-                loop = asyncio.get_running_loop()
-                async with _infer_semaphore:
-                    wavs, sr = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            _infer_executor,
-                            lambda s=sentence: _do_synthesize(s, language, voice, gen_kwargs)
-                        ),
-                        timeout=REQUEST_TIMEOUT
-                    )
+                if ws_temperature is not None:
+                    gen_kwargs["temperature"] = float(ws_temperature)
+                if ws_top_p is not None:
+                    gen_kwargs["top_p"] = float(ws_top_p)
+                wavs, sr = await asyncio.wait_for(
+                    _infer_queue.submit(
+                        lambda s=sentence: _do_synthesize(s, language, voice, gen_kwargs),
+                        priority=PRIORITY_REALTIME,
+                    ),
+                    timeout=REQUEST_TIMEOUT,
+                )
 
                 audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
                 if audio_data.ndim > 1:

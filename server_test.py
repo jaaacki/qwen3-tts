@@ -2,10 +2,12 @@
 import sys
 import io
 import hashlib
+import asyncio
 import pytest
 import torch
 import numpy as np
 import soundfile as sf
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch, MagicMock
 
 # Mock heavy imports before importing server
@@ -18,9 +20,9 @@ with patch.dict("sys.modules", _mock_modules):
         _trim_silence, _normalize_text, _expand_currency,
         _detect_language_unicode, _get_langdetect, detect_language,
         _adjust_speed, resolve_voice, _LANG_MAP,
-        _get_cached_ref_audio, _split_sentences, _adaptive_max_tokens,
+        _get_cached_voice_prompt, _split_sentences, _adaptive_max_tokens,
         _audio_cache_key, _get_audio_cache, _set_audio_cache,
-        _audio_cache, _AUDIO_CACHE_MAX,
+        _audio_cache, _AUDIO_CACHE_MAX, _build_gen_kwargs,
     )
     import server
 
@@ -398,7 +400,8 @@ class TestResolveVoice:
         assert resolve_voice("VIVIAN") == "vivian"
 
 
-# --- Issue #15: Voice prompt cache tests ---
+# --- Issue #15 → #82: Voice prompt cache tests ---
+# (Original #15 cached raw audio arrays; #82 upgrades to speaker embedding cache)
 
 def _make_wav_bytes(samples=None, sr=24000, channels=1):
     """Helper to create valid WAV bytes for testing."""
@@ -409,133 +412,6 @@ def _make_wav_bytes(samples=None, sr=24000, channels=1):
     buf = io.BytesIO()
     sf.write(buf, samples, sr, format="WAV")
     return buf.getvalue(), samples, sr
-
-
-class TestVoiceCacheBasics:
-    def setup_method(self):
-        server._voice_cache.clear()
-        server._voice_cache_hits = 0
-
-    def test_first_call_populates_cache(self):
-        wav_bytes, _, sr = _make_wav_bytes()
-        with patch.object(server, "VOICE_CACHE_MAX", 32):
-            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
-        assert result_sr == sr
-        assert len(server._voice_cache) == 1
-        assert isinstance(result_data, np.ndarray)
-
-    def test_second_call_returns_cached(self):
-        wav_bytes, _, _ = _make_wav_bytes()
-        with patch.object(server, "VOICE_CACHE_MAX", 32):
-            first_data, first_sr = _get_cached_ref_audio(wav_bytes)
-            hits_before = server._voice_cache_hits
-            second_data, second_sr = _get_cached_ref_audio(wav_bytes)
-        assert server._voice_cache_hits == hits_before + 1
-        np.testing.assert_array_equal(first_data, second_data)
-        assert first_sr == second_sr
-
-    def test_different_audio_gets_different_cache_entries(self):
-        wav1, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * 0.1)
-        wav2, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * 0.2)
-        with patch.object(server, "VOICE_CACHE_MAX", 32):
-            _get_cached_ref_audio(wav1)
-            _get_cached_ref_audio(wav2)
-        assert len(server._voice_cache) == 2
-
-
-class TestVoiceCacheLRU:
-    def setup_method(self):
-        server._voice_cache.clear()
-        server._voice_cache_hits = 0
-
-    def test_evicts_oldest_when_full(self):
-        wavs = []
-        for i in range(4):
-            w, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * (i + 1) * 0.1)
-            wavs.append(w)
-        with patch.object(server, "VOICE_CACHE_MAX", 2):
-            for w in wavs:
-                _get_cached_ref_audio(w)
-        assert len(server._voice_cache) == 2
-        # First two should have been evicted
-        key0 = hashlib.sha256(wavs[0]).hexdigest()
-        key1 = hashlib.sha256(wavs[1]).hexdigest()
-        assert key0 not in server._voice_cache
-        assert key1 not in server._voice_cache
-
-    def test_access_promotes_entry(self):
-        wavs = []
-        for i in range(3):
-            w, _, _ = _make_wav_bytes(np.ones(1000, dtype=np.float32) * (i + 1) * 0.1)
-            wavs.append(w)
-        with patch.object(server, "VOICE_CACHE_MAX", 2):
-            _get_cached_ref_audio(wavs[0])  # cache: [0]
-            _get_cached_ref_audio(wavs[1])  # cache: [0, 1]
-            _get_cached_ref_audio(wavs[0])  # hit, promotes 0 -> cache: [1, 0]
-            _get_cached_ref_audio(wavs[2])  # evicts 1 -> cache: [0, 2]
-        key0 = hashlib.sha256(wavs[0]).hexdigest()
-        key1 = hashlib.sha256(wavs[1]).hexdigest()
-        key2 = hashlib.sha256(wavs[2]).hexdigest()
-        assert key0 in server._voice_cache
-        assert key1 not in server._voice_cache
-        assert key2 in server._voice_cache
-
-
-class TestVoiceCacheDisabled:
-    def setup_method(self):
-        server._voice_cache.clear()
-        server._voice_cache_hits = 0
-
-    def test_cache_disabled_skips_caching(self):
-        wav_bytes, _, _ = _make_wav_bytes()
-        with patch.object(server, "VOICE_CACHE_MAX", 0):
-            _get_cached_ref_audio(wav_bytes)
-        assert len(server._voice_cache) == 0
-
-    def test_cache_disabled_still_returns_valid_audio(self):
-        wav_bytes, _, sr = _make_wav_bytes()
-        with patch.object(server, "VOICE_CACHE_MAX", 0):
-            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
-        assert result_sr == sr
-        assert isinstance(result_data, np.ndarray)
-        assert len(result_data) > 0
-
-
-class TestStereoToMono:
-    def setup_method(self):
-        server._voice_cache.clear()
-        server._voice_cache_hits = 0
-
-    def test_stereo_converted_to_mono(self):
-        mono_samples = np.random.randn(1000).astype(np.float32) * 0.1
-        wav_bytes, _, sr = _make_wav_bytes(mono_samples, channels=2)
-        with patch.object(server, "VOICE_CACHE_MAX", 32):
-            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
-        assert result_data.ndim == 1
-        assert result_sr == sr
-
-    def test_mono_stays_mono(self):
-        wav_bytes, _, sr = _make_wav_bytes()
-        with patch.object(server, "VOICE_CACHE_MAX", 32):
-            result_data, result_sr = _get_cached_ref_audio(wav_bytes)
-        assert result_data.ndim == 1
-
-
-class TestCacheKeyHashing:
-    def setup_method(self):
-        server._voice_cache.clear()
-        server._voice_cache_hits = 0
-
-    def test_same_content_same_key(self):
-        samples = np.ones(1000, dtype=np.float32) * 0.5
-        wav1, _, _ = _make_wav_bytes(samples)
-        wav2, _, _ = _make_wav_bytes(samples)
-        assert wav1 == wav2  # same input -> same bytes
-        with patch.object(server, "VOICE_CACHE_MAX", 32):
-            _get_cached_ref_audio(wav1)
-            _get_cached_ref_audio(wav2)
-        assert len(server._voice_cache) == 1
-        assert server._voice_cache_hits == 1
 
 
 # --- Issue #16: GPU memory pool pre-allocation tests ---
@@ -654,3 +530,248 @@ class TestAudioCacheGetSet:
             _set_audio_cache("key1", b"data", "audio/wav")
             assert len(_audio_cache) == 0
             assert _get_audio_cache("key1") is None
+
+
+# --- Issue #83: Generation parameter exposure tests ---
+
+
+class TestGenerationParams:
+    """temperature and top_p are passed through to model.generate() when set."""
+
+    def test_temperature_included_in_build_gen_kwargs(self):
+        """temperature in request -> present in gen_kwargs via _build_gen_kwargs."""
+        req = server.TTSRequest(input="hello", temperature=0.8)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["temperature"] == 0.8
+        assert "top_p" not in gen_kwargs
+
+    def test_top_p_included_in_build_gen_kwargs(self):
+        """top_p in request -> present in gen_kwargs via _build_gen_kwargs."""
+        req = server.TTSRequest(input="hello", top_p=0.95)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["top_p"] == 0.95
+        assert "temperature" not in gen_kwargs
+
+    def test_both_params_included(self):
+        """Both temperature and top_p set -> both in gen_kwargs."""
+        req = server.TTSRequest(input="hello", temperature=1.2, top_p=0.9)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["temperature"] == 1.2
+        assert gen_kwargs["top_p"] == 0.9
+
+    def test_neither_param_means_neither_in_kwargs(self):
+        """Omitting both leaves gen_kwargs with only max_new_tokens."""
+        req = server.TTSRequest(input="hello")
+        assert req.temperature is None
+        assert req.top_p is None
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert "temperature" not in gen_kwargs
+        assert "top_p" not in gen_kwargs
+        assert "max_new_tokens" in gen_kwargs
+
+    def test_max_new_tokens_always_present(self):
+        """_build_gen_kwargs always includes max_new_tokens from _adaptive_max_tokens."""
+        req = server.TTSRequest(input="hello", temperature=0.5)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["max_new_tokens"] == _adaptive_max_tokens("hello")
+
+    def test_ttsrequest_accepts_temperature_and_top_p(self):
+        """TTSRequest model accepts temperature and top_p fields."""
+        req = server.TTSRequest(input="test", temperature=1.2, top_p=0.9)
+        assert req.temperature == 1.2
+        assert req.top_p == 0.9
+
+
+# --- Issue #82: Voice clone prompt cache tests ---
+
+
+class TestVoiceClonePromptCache:
+    """create_voice_clone_prompt() is called at most once per unique ref audio."""
+
+    def _make_audio_bytes(self, seed: int = 42) -> bytes:
+        """Create deterministic fake WAV bytes for testing."""
+        buf = io.BytesIO()
+        rng = np.random.default_rng(seed)
+        sf.write(buf, rng.random(24000).astype(np.float32), 24000, format="WAV")
+        return buf.getvalue()
+
+    def setup_method(self):
+        server._voice_prompt_cache.clear()
+        server._voice_cache_hits = 0
+
+    def test_cache_miss_calls_create_prompt(self):
+        """First call for a ref audio invokes create_voice_clone_prompt exactly once."""
+        audio_bytes = self._make_audio_bytes()
+        mock_prompt = MagicMock(name="voice_prompt")
+        mock_model = MagicMock()
+        mock_model.create_voice_clone_prompt.return_value = mock_prompt
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 32):
+            result = server._get_cached_voice_prompt(audio_bytes, ref_text="hello")
+
+        mock_model.create_voice_clone_prompt.assert_called_once()
+        assert result is mock_prompt
+
+    def test_cache_hit_skips_create_prompt(self):
+        """Second call with the same audio returns cached prompt, no model call."""
+        audio_bytes = self._make_audio_bytes()
+        mock_prompt = MagicMock(name="voice_prompt")
+        mock_model = MagicMock()
+        mock_model.create_voice_clone_prompt.return_value = mock_prompt
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 32):
+            server._get_cached_voice_prompt(audio_bytes, ref_text="hello")
+            result = server._get_cached_voice_prompt(audio_bytes, ref_text="hello")
+
+        assert mock_model.create_voice_clone_prompt.call_count == 1
+        assert result is mock_prompt
+        assert server._voice_cache_hits == 1
+
+    def test_different_audio_different_cache_entry(self):
+        """Different ref audio bytes create separate cache entries."""
+        audio1 = self._make_audio_bytes(seed=1)
+        audio2 = self._make_audio_bytes(seed=2)
+        mock_prompt1 = MagicMock(name="prompt1")
+        mock_prompt2 = MagicMock(name="prompt2")
+        mock_model = MagicMock()
+        mock_model.create_voice_clone_prompt.side_effect = [mock_prompt1, mock_prompt2]
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 32):
+            r1 = server._get_cached_voice_prompt(audio1, ref_text="a")
+            r2 = server._get_cached_voice_prompt(audio2, ref_text="b")
+
+        assert r1 is mock_prompt1
+        assert r2 is mock_prompt2
+        assert mock_model.create_voice_clone_prompt.call_count == 2
+        assert len(server._voice_prompt_cache) == 2
+
+    def test_lru_eviction_removes_oldest_entry(self):
+        """When cache exceeds VOICE_CACHE_MAX, oldest entry is evicted."""
+        mock_model = MagicMock()
+        mock_model.create_voice_clone_prompt.return_value = MagicMock()
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 2):
+            a1 = self._make_audio_bytes(seed=10)
+            a2 = self._make_audio_bytes(seed=11)
+            a3 = self._make_audio_bytes(seed=12)
+            server._get_cached_voice_prompt(a1, ref_text="x")
+            server._get_cached_voice_prompt(a2, ref_text="y")
+            # This should evict a1
+            server._get_cached_voice_prompt(a3, ref_text="z")
+
+        assert len(server._voice_prompt_cache) == 2
+        key1 = hashlib.sha256(a1).hexdigest()
+        assert key1 not in server._voice_prompt_cache
+
+    def test_cache_disabled_still_computes_prompt(self):
+        """When VOICE_CACHE_MAX=0, prompt is still computed but not cached."""
+        audio_bytes = self._make_audio_bytes()
+        mock_prompt = MagicMock(name="voice_prompt")
+        mock_model = MagicMock()
+        mock_model.create_voice_clone_prompt.return_value = mock_prompt
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 0):
+            result = server._get_cached_voice_prompt(audio_bytes, ref_text="hello")
+
+        assert result is mock_prompt
+        assert len(server._voice_prompt_cache) == 0
+
+    def test_access_promotes_entry(self):
+        """Accessing a cached entry promotes it, preventing eviction."""
+        mock_model = MagicMock()
+        prompts = [MagicMock(name=f"p{i}") for i in range(3)]
+        mock_model.create_voice_clone_prompt.side_effect = prompts
+
+        a0 = self._make_audio_bytes(seed=100)
+        a1 = self._make_audio_bytes(seed=101)
+        a2 = self._make_audio_bytes(seed=102)
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 2):
+            server._get_cached_voice_prompt(a0, ref_text="x")  # cache: [a0]
+            server._get_cached_voice_prompt(a1, ref_text="y")  # cache: [a0, a1]
+            server._get_cached_voice_prompt(a0, ref_text="x")  # hit, promotes -> [a1, a0]
+            server._get_cached_voice_prompt(a2, ref_text="z")  # evicts a1 -> [a0, a2]
+
+        key0 = hashlib.sha256(a0).hexdigest()
+        key1 = hashlib.sha256(a1).hexdigest()
+        key2 = hashlib.sha256(a2).hexdigest()
+        assert key0 in server._voice_prompt_cache
+        assert key1 not in server._voice_prompt_cache
+        assert key2 in server._voice_prompt_cache
+
+
+# --- Issue #81: Priority inference queue tests ---
+
+
+class TestPriorityInferQueue:
+    """Tests for PriorityInferQueue scheduling."""
+
+    def test_higher_priority_runs_before_lower(self):
+        """Priority 0 job completes before priority 1 job when both queued."""
+        order = []
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            t1 = asyncio.create_task(queue.submit(lambda: order.append("low") or "low", priority=1))
+            await asyncio.sleep(0)
+            t2 = asyncio.create_task(queue.submit(lambda: order.append("high") or "high", priority=0))
+            await asyncio.gather(t1, t2)
+
+        asyncio.run(run())
+        # Both jobs should have executed
+        assert set(order) == {"low", "high"}
+
+    def test_submit_returns_function_result(self):
+        """Queue.submit resolves the future with the function's return value."""
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+            result = await queue.submit(lambda: 42, priority=1)
+            assert result == 42
+
+        asyncio.run(run())
+
+    def test_submit_propagates_exception(self):
+        """Queue.submit propagates exceptions from the worker function."""
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            def boom():
+                raise ValueError("boom")
+
+            with pytest.raises(ValueError, match="boom"):
+                await queue.submit(boom, priority=1)
+
+        asyncio.run(run())
+
+    def test_fifo_within_same_priority(self):
+        """Jobs with equal priority execute in submission order."""
+        order = []
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+            for i in range(3):
+                await queue.submit(lambda i=i: order.append(i) or i, priority=1)
+
+        asyncio.run(run())
+        assert order == [0, 1, 2]
+
+    def test_priority_constants_exist(self):
+        """PRIORITY_REALTIME and PRIORITY_BATCH are defined correctly."""
+        assert server.PRIORITY_REALTIME == 0
+        assert server.PRIORITY_BATCH == 1
+        assert server.PRIORITY_REALTIME < server.PRIORITY_BATCH

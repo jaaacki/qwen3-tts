@@ -4,6 +4,55 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0016 — Priority inference queue: why a semaphore is not enough
+**Date**: 2026-02-24
+**Type**: What just happened
+**Related**: Issue #81 — Replace inference semaphore with priority queue
+
+The original server used `asyncio.Semaphore(1)` to serialize GPU inference. This was correct for preventing OOM, but it treated all requests equally. A 10-sentence batch REST request and a real-time WebSocket stream competing for the semaphore had equal chances of acquiring it. For a TTS server serving both interactive clients (WebSocket, SSE streaming, raw PCM) and bulk callers (REST `/v1/audio/speech`), this is wrong. A user on a phone call hearing silence while their stream waits behind a batch job is a perceptible quality regression.
+
+The replacement is a `PriorityInferQueue` backed by `heapq` (stdlib min-heap). Jobs are `@dataclass(order=True)` with `(priority, submit_time)` as the sort key. Lower priority number means higher urgency: `PRIORITY_REALTIME=0` for streaming endpoints, `PRIORITY_BATCH=1` for REST. When multiple jobs are queued, the worker always pops the lowest-priority-number job first. Within the same priority level, `submit_time` (monotonic clock) ensures FIFO ordering.
+
+The queue uses `asyncio.Lock` (not a threading lock) because all heap mutations happen in async code. An `asyncio.Event` wakes the worker when new jobs arrive, avoiding busy-waiting. The worker runs `loop.run_in_executor()` on the same single-thread `_infer_executor`, preserving the guarantee that only one GPU inference runs at a time.
+
+The key design choice was keeping the queue as a module-level singleton (`_infer_queue`) started from `lifespan()`. This matches the existing pattern for `_idle_watchdog` and keeps the startup/shutdown lifecycle centralized. Each endpoint simply calls `await _infer_queue.submit(fn, priority=...)` instead of `async with _infer_semaphore:` followed by `loop.run_in_executor(...)`.
+
+Five sites were updated: `synthesize_speech` (batch), `synthesize_speech_stream` (realtime), `clone_voice` (batch), `synthesize_speech_stream_pcm` (realtime), and `ws_synthesize` (realtime). The `loop = asyncio.get_running_loop()` lines at those sites were removed since the queue handles the executor call internally.
+
+---
+
+## Entry 0015 — Voice clone prompt cache: caching at the right layer
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #82 — Fix voice clone caching — use `create_voice_clone_prompt()`
+
+The original `_voice_cache` (#15) stored `(np.ndarray, int)` — the decoded reference audio array and sample rate. This saved the cost of reading and decoding the uploaded WAV file (~1ms), but missed the actual bottleneck: computing the speaker embedding inside `model.generate_voice_clone()`. Every clone request, even with identical reference audio, ran the full encoder pass to extract the voice embedding. This pass dominates the preprocessing cost (50-200ms depending on audio length).
+
+The fix is to cache at the embedding layer, not the audio layer. `model.create_voice_clone_prompt()` takes the decoded audio and reference text, runs the encoder once, and returns a reusable prompt object containing the speaker embedding. Subsequent `generate_voice_clone()` calls accept this prompt via `ref_prompt=` and skip the encoder entirely.
+
+The cache structure is unchanged — `OrderedDict` with SHA-256 content hash keys, LRU eviction, configurable via `VOICE_CACHE_MAX`. What changed is *what* gets cached: opaque prompt objects instead of numpy arrays. The trade-off is that prompt objects may hold GPU tensors (consuming VRAM proportional to cache size), but at 32 entries default this is negligible compared to the 2.4 GB model weights.
+
+The `/cache/clear` endpoint was also updated to clear both audio and voice prompt caches, returning separate counts for each. This is a minor API change (the response shape changed from `{"cleared": N}` to `{"audio_cleared": N, "voice_cleared": M}`).
+
+Key observation: caching at the wrong layer is worse than no caching at all — it gives operators false confidence that "caching is working" while the expensive operation still runs on every request.
+
+---
+
+## Entry 0014 — Exposing generation parameters: temperature and top_p
+**Date**: 2026-02-24
+**Type**: What just happened
+**Related**: Issue #83 — Expose temperature and top_p in TTSRequest
+
+The Qwen3-TTS model's `generate_custom_voice()` and `generate_voice_clone()` accept standard HuggingFace generation kwargs (`temperature`, `top_p`, etc.) but the server hardcoded only `max_new_tokens`. Clients had no way to control generation diversity.
+
+The fix adds two optional fields to `TTSRequest` (both default to `None`) and a `_build_gen_kwargs()` helper that conditionally includes them in the kwargs dict. When `None`, the key is omitted entirely — the model uses its own defaults, preserving exact backward compatibility. This matters because passing `temperature=None` explicitly to HuggingFace's `generate()` would be different from not passing it at all.
+
+The DRY improvement is incidental but valuable: four endpoints had identical `gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}` lines. The helper centralizes this pattern. Two endpoints (clone and WebSocket) build kwargs inline because they don't use `TTSRequest` — clone uses `Form` params and WebSocket uses raw JSON.
+
+A pre-existing bug was fixed in the clone endpoint: `_adaptive_max_tokens(text)` was called before `text = input.strip()`, using an undefined variable. The reordering to assign `text` first was necessary for correctness regardless of the temperature/top_p feature.
+
+---
+
 ## Entry 0012 — GPU memory pool pre-warming and CUDA allocator tuning
 **Date**: 2026-02-20
 **Type**: Why this design
