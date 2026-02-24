@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased — Issue #81: priority queue] — 2026-02-24
+
+### Changed
+- Replaced `asyncio.Semaphore(1)` inference serialization with `PriorityInferQueue` min-heap (#81)
+- WebSocket, SSE, and raw PCM streaming endpoints now run at `PRIORITY_REALTIME=0`
+- REST `/v1/audio/speech` and `/v1/audio/speech/clone` run at `PRIORITY_BATCH=1`
+- Under mixed load, real-time streaming clients are always dispatched before batch REST callers
+
+---
+
 ## [Unreleased — Issue #82: voice clone prompt cache] — 2026-02-24
 
 ### Changed
@@ -21,6 +31,9 @@
 ### Changed
 - Replaced 4x repeated inline `gen_kwargs` dict construction with `_build_gen_kwargs()` calls in `/v1/audio/speech`, `/v1/audio/speech/stream`, `/v1/audio/speech/stream/pcm`
 - Fixed variable ordering bug in `/v1/audio/speech/clone` where `_adaptive_max_tokens(text)` was called before `text` was assigned
+
+---
+
 
 ## v0.6.0 — 2026-02-20
 

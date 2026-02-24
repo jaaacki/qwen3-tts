@@ -2,10 +2,12 @@
 import sys
 import io
 import hashlib
+import asyncio
 import pytest
 import torch
 import numpy as np
 import soundfile as sf
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch, MagicMock
 
 # Mock heavy imports before importing server
@@ -702,3 +704,74 @@ class TestVoiceClonePromptCache:
         assert key0 in server._voice_prompt_cache
         assert key1 not in server._voice_prompt_cache
         assert key2 in server._voice_prompt_cache
+
+
+# --- Issue #81: Priority inference queue tests ---
+
+
+class TestPriorityInferQueue:
+    """Tests for PriorityInferQueue scheduling."""
+
+    def test_higher_priority_runs_before_lower(self):
+        """Priority 0 job completes before priority 1 job when both queued."""
+        order = []
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            t1 = asyncio.create_task(queue.submit(lambda: order.append("low") or "low", priority=1))
+            await asyncio.sleep(0)
+            t2 = asyncio.create_task(queue.submit(lambda: order.append("high") or "high", priority=0))
+            await asyncio.gather(t1, t2)
+
+        asyncio.run(run())
+        # Both jobs should have executed
+        assert set(order) == {"low", "high"}
+
+    def test_submit_returns_function_result(self):
+        """Queue.submit resolves the future with the function's return value."""
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+            result = await queue.submit(lambda: 42, priority=1)
+            assert result == 42
+
+        asyncio.run(run())
+
+    def test_submit_propagates_exception(self):
+        """Queue.submit propagates exceptions from the worker function."""
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            def boom():
+                raise ValueError("boom")
+
+            with pytest.raises(ValueError, match="boom"):
+                await queue.submit(boom, priority=1)
+
+        asyncio.run(run())
+
+    def test_fifo_within_same_priority(self):
+        """Jobs with equal priority execute in submission order."""
+        order = []
+
+        async def run():
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+            for i in range(3):
+                await queue.submit(lambda i=i: order.append(i) or i, priority=1)
+
+        asyncio.run(run())
+        assert order == [0, 1, 2]
+
+    def test_priority_constants_exist(self):
+        """PRIORITY_REALTIME and PRIORITY_BATCH are defined correctly."""
+        assert server.PRIORITY_REALTIME == 0
+        assert server.PRIORITY_BATCH == 1
+        assert server.PRIORITY_REALTIME < server.PRIORITY_BATCH
