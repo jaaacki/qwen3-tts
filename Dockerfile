@@ -10,8 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Optional quantization — install only in GPU builds (they're large packages)
-RUN pip install --no-cache-dir --prefix=/install "bitsandbytes>=0.43.0" "torchao>=0.5.0" || true
+# Optional quantization — bitsandbytes only; torchao skipped because
+# torchao 0.5.x (torch 2.5) lacks APIs that transformers 4.57+ expects,
+# and newer torchao requires torch 2.6+
+RUN pip install --no-cache-dir --prefix=/install "bitsandbytes>=0.43.0" || true
 
 # Stage 2: runtime — lean image with only what's needed
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
@@ -40,8 +42,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed Python packages from builder
-COPY --from=builder /install /usr/local
+# Copy installed Python packages from builder into conda's site-packages
+COPY --from=builder /install/lib/python3.11/site-packages/ /opt/conda/lib/python3.11/site-packages/
+COPY --from=builder /install/bin/ /opt/conda/bin/
 
 # Copy application
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
