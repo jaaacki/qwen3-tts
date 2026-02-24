@@ -21,3 +21,6 @@ E2Etest/reports/
 
 # Claude Code local settings
 .claude/
+
+# Git worktrees
+.worktrees/
