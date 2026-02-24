@@ -28,6 +28,7 @@ services:
       # Set both to PEM file paths inside the container to enable HTTPS + HTTP/2
       - SSL_KEYFILE=
       - SSL_CERTFILE=
+      - GATEWAY_MODE=false   # set true for lightweight proxy mode (~30 MB idle vs ~1 GB)
     volumes:
       - ./models:/root/.cache/huggingface
     ipc: host  # Share host IPC namespace — reduces CUDA IPC overhead for GPU tensor sharing

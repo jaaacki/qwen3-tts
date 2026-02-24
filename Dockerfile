@@ -46,14 +46,13 @@ COPY --from=builder /install /usr/local
 # Copy application
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
+COPY gateway.py /app/gateway.py
+COPY worker.py /app/worker.py
 
 EXPOSE 8000
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["uvicorn", "server:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--loop", "uvloop", \
-     "--http", "httptools", \
-     "--no-access-log", \
-     "--timeout-keep-alive", "65"]
+CMD if [ "${GATEWAY_MODE:-false}" = "true" ]; then \
+      exec uvicorn gateway:app --host 0.0.0.0 --port 8000 --loop uvloop --http httptools --no-access-log; \
+    else \
+      exec /app/docker-entrypoint.sh uvicorn server:app --host 0.0.0.0 --port 8000 --loop uvloop --http httptools --no-access-log --timeout-keep-alive 65; \
+    fi

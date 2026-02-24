@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased — Issue #85: gateway/worker mode] — 2026-02-24
+
+### Added
+- `gateway.py` — lightweight FastAPI proxy that manages inference worker subprocess (#85)
+- `worker.py` — worker subprocess entry point; preloads model, disables idle timeout (#85)
+- `GATEWAY_MODE` env var in compose.yaml — set `true` for ~30 MB idle footprint vs ~1 GB (#85)
+- `WORKER_HOST`, `WORKER_PORT` env vars for gateway → worker routing (#85)
+
+### Changed
+- Dockerfile CMD now branches on `GATEWAY_MODE`: gateway or full server (#85)
+
+---
+
 ## [Unreleased — Issue #86: quantization support] — 2026-02-24
 
 ### Added

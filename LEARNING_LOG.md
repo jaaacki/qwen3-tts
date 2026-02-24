@@ -4,6 +4,23 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0018 — Gateway/Worker mode: why two processes beat one idle process
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #85 — Add Gateway/Worker mode for minimal idle footprint
+
+The idle RAM problem: even with `IDLE_TIMEOUT` unloading the model from VRAM, the Python process still holds ~1 GB RSS from PyTorch, CUDA runtime, and the loaded server modules. In shared GPU environments where the TTS service may sit idle for hours between requests, that memory is wasted.
+
+The two-process split solves this by separating concerns. `gateway.py` is a minimal FastAPI proxy (~30 MB RSS) that knows nothing about models or inference. It spawns `worker.py` (the full TTS server) as a subprocess only when a request arrives, then kills it after `IDLE_TIMEOUT` seconds of inactivity. When the worker dies, all its memory (Python heap, CUDA context, model weights) is reclaimed by the OS — something that is impossible to achieve within a single Python process due to allocator fragmentation.
+
+The gateway uses `aiohttp.ClientSession` to proxy all HTTP requests transparently to the worker on an internal port (`WORKER_PORT=8001`). A double-checked lock (`_worker_lock`) prevents concurrent request storms from spawning multiple workers. The idle watchdog runs every 30 seconds, checking `_last_used` against `IDLE_TIMEOUT`.
+
+The main trade-off is cold start latency: the first request after an idle kill pays the full model load time (~10-15 seconds). This is acceptable for the target use case (shared GPU, infrequent usage) where memory savings outweigh startup latency.
+
+Note: streaming (SSE) and WebSocket endpoints are not proxied correctly in this initial version — `gateway.py` buffers full responses. These are known limitations documented for a follow-up issue.
+
+---
+
 ## Entry 0019 — Quantization: when to trade precision for VRAM
 **Date**: 2026-02-24
 **Type**: Why this design
