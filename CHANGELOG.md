@@ -1,40 +1,41 @@
 # Changelog
 
-## [Unreleased — Issue #84: batch inference] — 2026-02-24
+## v0.8.0 — 2026-02-24
+
+Phase 5 Scale complete. Issues #84–#86 implemented.
 
 ### Added
 - `PriorityInferQueue.submit_batch()` — queues a batchable synthesis job with `batch_key="synthesis"` (#84)
 - `_do_synthesize_batch()` — dispatches multiple texts in a single `model.generate_custom_voice(text=[...])` call (#84)
 - `MAX_BATCH_SIZE` env var (default 4) — controls max jobs per GPU dispatch (#84)
-
-### Changed
-- `PriorityInferQueue._worker()` now drains all pending synthesis jobs up to `MAX_BATCH_SIZE` and dispatches in one GPU call (#84)
-- `synthesize_speech` falls back to single-job path when `instruct` param is set (#84)
-
----
-
-## [Unreleased — Issue #85: gateway/worker mode] — 2026-02-24
-
-### Added
 - `gateway.py` — lightweight FastAPI proxy that manages inference worker subprocess (#85)
 - `worker.py` — worker subprocess entry point; preloads model, disables idle timeout (#85)
 - `GATEWAY_MODE` env var in compose.yaml — set `true` for ~30 MB idle footprint vs ~1 GB (#85)
 - `WORKER_HOST`, `WORKER_PORT` env vars for gateway → worker routing (#85)
-
-### Changed
-- Dockerfile CMD now branches on `GATEWAY_MODE`: gateway or full server (#85)
-
----
-
-## [Unreleased — Issue #86: quantization support] — 2026-02-24
-
-### Added
 - `QUANTIZE` env var — `int8` (bitsandbytes, ~50% VRAM reduction) or `fp8` (torchao, ~67% VRAM reduction) (#86)
 - `_resolve_quant_kwargs()` helper — returns `(dtype, load_kwargs)` for model loading (#86)
 - `bitsandbytes>=0.43.0` and `torchao>=0.5.0` added to `requirements.txt` (optional, install only when needed) (#86)
 
 ### Changed
+- `PriorityInferQueue._worker()` now drains all pending synthesis jobs up to `MAX_BATCH_SIZE` and dispatches in one GPU call (#84)
+- `synthesize_speech` falls back to single-job path when `instruct` param is set (#84)
+- Dockerfile CMD now branches on `GATEWAY_MODE`: gateway or full server (#85)
 - `_load_model_sync()` uses `_resolve_quant_kwargs()` instead of hardcoded `dtype=torch.bfloat16` (#86)
+
+### Detail
+
+**#84 Batch inference**
+- Synthesis jobs tagged with `batch_key="synthesis"` are drained atomically from the heap in one lock pass; `_do_synthesize_batch()` pads and runs them as a single forward pass
+- `instruct` and voice-clone requests fall back to single-job path automatically (model batch API does not support mixed modes)
+- Setting `MAX_BATCH_SIZE=1` effectively disables batching while keeping code path consistent
+
+**#85 Gateway/Worker mode**
+- `gateway.py` (~30 MB RSS idle) spawns `worker.py` on first request; double-checked lock prevents concurrent spawns; idle watchdog kills worker after `IDLE_TIMEOUT` seconds
+- Known limitations: SSE and WebSocket endpoints buffered (not streamed) through the proxy — documented for follow-up
+
+**#86 Quantization**
+- `int8` → bitsandbytes `load_in_8bit=True`, `float16` dtype (~50% VRAM); `fp8` → torchao `TorchAoConfig`, `bfloat16` dtype (~67% VRAM, Hopper+ only)
+- `_resolve_quant_kwargs()` validates at model load time; misconfigured `QUANTIZE` fails fast with a clear error
 
 ---
 
