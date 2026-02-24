@@ -44,15 +44,15 @@ class TestVoiceMapping:
         print(f"Audio bytes: {len(audio)}")
         print(f"Format: wav")
 
-    def test_unknown_voice_passthrough(self, ensure_server, ensure_model_loaded):
-        """Unknown voice name passes through to model (server does not reject it).
-
-        The model may use a default voice or produce silence — what matters is
-        that the server returns audio bytes without a 4xx/5xx error.
-        """
+    def test_unknown_voice_returns_400(self, ensure_server):
+        """Unknown voice name returns 400 with valid voice list (#99)."""
         with TTSHTTPClient() as client:
-            audio = client.synthesize(TEXT, voice="custom_voice_xyz", response_format="wav")
-        assert len(audio) > 0
+            response = client.client.post(
+                f"{client.base_url}/v1/audio/speech",
+                json={"input": TEXT, "voice": "custom_voice_xyz", "response_format": "wav"},
+            )
+        assert response.status_code == 400
+        assert "voice" in response.json().get("detail", "").lower()
 
 
 class TestVoiceOutput:
