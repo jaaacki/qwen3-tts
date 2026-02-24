@@ -648,6 +648,24 @@ class TestVoiceClonePromptCache:
         assert mock_model.create_voice_clone_prompt.call_count == 2
         assert len(server._voice_prompt_cache) == 2
 
+    def test_same_audio_different_ref_text_different_cache_entry(self):
+        """Same audio bytes + different ref_text produces separate cache entries."""
+        audio = self._make_audio_bytes(seed=42)
+        mock_prompt1 = MagicMock(name="prompt_text_a")
+        mock_prompt2 = MagicMock(name="prompt_text_b")
+        mock_model = MagicMock()
+        mock_model.create_voice_clone_prompt.side_effect = [mock_prompt1, mock_prompt2]
+
+        with patch.object(server, "model", mock_model), \
+             patch.object(server, "VOICE_CACHE_MAX", 32):
+            r1 = server._get_cached_voice_prompt(audio, ref_text="hello")
+            r2 = server._get_cached_voice_prompt(audio, ref_text="world")
+
+        assert r1 is mock_prompt1
+        assert r2 is mock_prompt2
+        assert mock_model.create_voice_clone_prompt.call_count == 2
+        assert len(server._voice_prompt_cache) == 2
+
     def test_lru_eviction_removes_oldest_entry(self):
         """When cache exceeds VOICE_CACHE_MAX, oldest entry is evicted."""
         mock_model = MagicMock()

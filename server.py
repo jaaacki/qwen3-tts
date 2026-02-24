@@ -700,7 +700,8 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
     """
     global _voice_cache_hits
 
-    cache_key = hashlib.sha256(audio_bytes).hexdigest()
+    key_material = audio_bytes + (ref_text or "").encode()
+    cache_key = hashlib.sha256(key_material).hexdigest()
 
     if VOICE_CACHE_MAX > 0 and cache_key in _voice_prompt_cache:
         _voice_cache_hits += 1
