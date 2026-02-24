@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
+# Optional quantization — install only in GPU builds (they're large packages)
+RUN pip install --no-cache-dir --prefix=/install "bitsandbytes>=0.43.0" "torchao>=0.5.0" || true
+
 # Stage 2: runtime — lean image with only what's needed
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
