@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.9.1 — 2026-02-24
+
+Comprehensive logging coverage — every significant code path now has structured log output.
+
+### Added
+- **Startup config dump** — all env var settings logged at startup (`IDLE_TIMEOUT`, `MAX_QUEUE_DEPTH`, `QUANTIZE`, etc.)
+- **Cache operation logging** (DEBUG) — audio cache hit/miss/eviction, voice prompt cache hit/miss/eviction, cache-hit early-return in `/v1/audio/speech` with `synthesis_cache_hit` event, `/cache/clear` logged
+- **Error/exception logging** (ERROR) — all timeout 504s, internal 500s log with full exception traceback via `logger.opt(exception=True)`; all validation 400s and queue-full 503s log at WARNING with request context
+- **Streaming endpoint completion** — `/v1/audio/speech/stream` emits `stream_complete`, `/v1/audio/speech/stream/pcm` emits `pcm_stream_complete` with sentence count, chunks sent, timing
+- **WebSocket lifecycle** — connect (DEBUG), disconnect (INFO with message count and duration), errors (ERROR with traceback)
+- **Idle watchdog logging** — logs when idle timeout is reached before triggering model unload
+- **Inference queue logging** (DEBUG) — batch vs single dispatch decisions with batch size and remaining queue depth; batch/single inference failures logged at ERROR
+- **Unknown voice logging** — logs WARNING when unknown voice name is requested
+
+---
+
 ## v0.9.0 — 2026-02-24
 
 Logging migration from stdlib to loguru.

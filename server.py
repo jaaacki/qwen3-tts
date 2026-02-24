@@ -206,6 +206,8 @@ class PriorityInferQueue:
                     langs = [j.batch_args["language"] for j in batch_jobs]
                     speakers = [j.batch_args["speaker"] for j in batch_jobs]
                     kwargs_list = [j.batch_args["gen_kwargs"] for j in batch_jobs]
+                    logger.debug("Queue dispatching batch", batch_size=len(batch_jobs),
+                                 remaining=len(self._heap))
                     try:
                         wavs, srs = await loop.run_in_executor(
                             self._infer_executor,
@@ -216,15 +218,19 @@ class PriorityInferQueue:
                             if not job.future.done():
                                 job.future.set_result(([wav], sr))
                     except Exception as exc:
+                        logger.opt(exception=True).error("Batch inference failed", batch_size=len(batch_jobs))
                         for job in batch_jobs:
                             if not job.future.done():
                                 job.future.set_exception(exc)
                 else:
+                    logger.debug("Queue dispatching single job", priority=single_job.priority,
+                                 remaining=len(self._heap))
                     try:
                         result = await loop.run_in_executor(self._infer_executor, single_job.fn)
                         if not single_job.future.done():
                             single_job.future.set_result(result)
                     except Exception as exc:
+                        logger.opt(exception=True).error("Single job inference failed")
                         if not single_job.future.done():
                             single_job.future.set_exception(exc)
 
@@ -297,16 +303,23 @@ def _get_audio_cache(key: str) -> tuple[bytes, str] | None:
         return None
     if key in _audio_cache:
         _audio_cache.move_to_end(key)
+        logger.debug("Audio cache hit", cache_key=key[:12], cache_size=len(_audio_cache))
         return _audio_cache[key]
+    logger.debug("Audio cache miss", cache_key=key[:12], cache_size=len(_audio_cache))
     return None
 
 
 def _set_audio_cache(key: str, data: bytes, content_type: str) -> None:
     if _AUDIO_CACHE_MAX <= 0:
         return
-    if len(_audio_cache) >= _AUDIO_CACHE_MAX:
+    evicted = len(_audio_cache) >= _AUDIO_CACHE_MAX
+    if evicted:
         _audio_cache.popitem(last=False)
     _audio_cache[key] = (data, content_type)
+    if evicted:
+        logger.debug("Audio cache store (evicted LRU)", cache_key=key[:12], cache_size=len(_audio_cache))
+    else:
+        logger.debug("Audio cache store", cache_key=key[:12], cache_size=len(_audio_cache))
 
 # Voice prompt cache — caches speaker embeddings by reference audio content hash
 # Uses model.create_voice_clone_prompt() to precompute the embedding once,
@@ -314,6 +327,18 @@ def _set_audio_cache(key: str, data: bytes, content_type: str) -> None:
 VOICE_CACHE_MAX = int(os.getenv("VOICE_CACHE_MAX", "32"))
 _voice_prompt_cache: OrderedDict = OrderedDict()
 _voice_cache_hits = 0
+
+logger.bind(
+    PRELOAD_MODEL=PRELOAD_MODEL,
+    IDLE_TIMEOUT=IDLE_TIMEOUT,
+    REQUEST_TIMEOUT=REQUEST_TIMEOUT,
+    TEXT_NORMALIZE=TEXT_NORMALIZE,
+    MAX_QUEUE_DEPTH=MAX_QUEUE_DEPTH,
+    QUANTIZE=QUANTIZE or "none",
+    MAX_BATCH_SIZE=MAX_BATCH_SIZE,
+    AUDIO_CACHE_MAX=_AUDIO_CACHE_MAX,
+    VOICE_CACHE_MAX=VOICE_CACHE_MAX,
+).info("Server configuration loaded")
 
 # Map OpenAI-style voice names to Qwen3-TTS speakers
 VOICE_MAP = {
@@ -522,7 +547,9 @@ async def _idle_watchdog():
         await asyncio.sleep(30)
         if IDLE_TIMEOUT <= 0 or model is None:
             continue
-        if time.time() - _last_used > IDLE_TIMEOUT:
+        idle_secs = time.time() - _last_used
+        if idle_secs > IDLE_TIMEOUT:
+            logger.bind(idle_s=round(idle_secs), timeout_s=IDLE_TIMEOUT).info("Idle timeout reached, unloading model")
             async with _model_lock:
                 if model is not None and time.time() - _last_used > IDLE_TIMEOUT:
                     loop = asyncio.get_running_loop()
@@ -592,6 +619,7 @@ async def clear_cache():
     voice_count = len(_voice_prompt_cache)
     _audio_cache.clear()
     _voice_prompt_cache.clear()
+    logger.bind(audio_cleared=audio_count, voice_cleared=voice_count).info("Cache cleared")
     return {"audio_cleared": audio_count, "voice_cleared": voice_count}
 
 
@@ -656,6 +684,7 @@ def resolve_voice(voice: Optional[str]) -> str:
     resolved = VOICE_MAP.get(voice_lower, voice_lower)
     if resolved not in KNOWN_SPEAKERS:
         valid = sorted(VOICE_MAP.keys())
+        logger.bind(voice=voice, resolved=resolved).warning("Unknown voice requested")
         raise HTTPException(
             status_code=400,
             detail=f"Unknown voice '{voice}'. Valid voices: {', '.join(valid)}",
@@ -821,6 +850,7 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
     if VOICE_CACHE_MAX > 0 and cache_key in _voice_prompt_cache:
         _voice_cache_hits += 1
         _voice_prompt_cache.move_to_end(cache_key)
+        logger.debug("Voice prompt cache hit", cache_key=cache_key[:12], hits=_voice_cache_hits)
         return _voice_prompt_cache[cache_key]
 
     # Decode audio to pass to create_voice_clone_prompt
@@ -837,9 +867,12 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
     )
 
     if VOICE_CACHE_MAX > 0:
+        evicted = len(_voice_prompt_cache) >= VOICE_CACHE_MAX
         _voice_prompt_cache[cache_key] = prompt
         while len(_voice_prompt_cache) > VOICE_CACHE_MAX:
             _voice_prompt_cache.popitem(last=False)
+        logger.debug("Voice prompt cached{}", " (evicted LRU)" if evicted else "",
+                     cache_key=cache_key[:12], cache_size=len(_voice_prompt_cache))
 
     return prompt
 
@@ -881,6 +914,8 @@ async def synthesize_speech(request: TTSRequest):
 
     # Early rejection when queue is full
     if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech",
+                     queue_depth=_queue_depth).warning("Request rejected: queue full")
         raise HTTPException(
             status_code=503,
             detail=f"Server busy: {_queue_depth} requests queued. Try again later.",
@@ -888,6 +923,7 @@ async def synthesize_speech(request: TTSRequest):
         )
 
     if not request.input or not request.input.strip():
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     speaker = resolve_voice(request.voice)
@@ -901,6 +937,10 @@ async def synthesize_speech(request: TTSRequest):
         )
         cached = _get_audio_cache(cache_key)
         if cached is not None:
+            logger.bind(request_id=request_id, endpoint="/v1/audio/speech",
+                        voice=speaker, chars=len(text), format=request.response_format,
+                        total_ms=round((time.perf_counter() - t_start) * 1000),
+                        ).info("synthesis_cache_hit")
             return Response(
                 content=cached[0],
                 media_type=cached[1],
@@ -974,10 +1014,13 @@ async def synthesize_speech(request: TTSRequest):
         )
 
     except asyncio.TimeoutError:
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech",
+                     timeout_s=REQUEST_TIMEOUT).error("Synthesis timed out")
         raise HTTPException(status_code=504, detail="Synthesis timed out")
     except HTTPException:
         raise
     except Exception as e:
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech").opt(exception=True).error("Synthesis failed")
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
     finally:
         _queue_depth -= 1
@@ -990,6 +1033,7 @@ async def synthesize_speech_stream(request: TTSRequest):
     await _ensure_model_loaded()
 
     if not request.input or not request.input.strip():
+        logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     speaker = resolve_voice(request.voice)
@@ -998,9 +1042,12 @@ async def synthesize_speech_stream(request: TTSRequest):
     sentences = _split_sentences(text)
 
     if not sentences:
+        logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: no sentences")
         raise HTTPException(status_code=400, detail="No sentences found in input")
 
     async def generate():
+        t_stream_start = time.perf_counter()
+        chunks_sent = 0
         for sentence in sentences:
             try:
                 gen_kwargs = _build_gen_kwargs(sentence, request)
@@ -1027,17 +1074,26 @@ async def synthesize_speech_stream(request: TTSRequest):
                 audio_int16 = (audio_data * 32767).astype(np.int16)
                 pcm_bytes = audio_int16.tobytes()
                 yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
+                chunks_sent += 1
 
                 _last_used = time.time()
 
             except asyncio.TimeoutError:
+                logger.bind(endpoint="/v1/audio/speech/stream", voice=speaker,
+                             chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("Stream synthesis timed out")
                 yield "data: [ERROR] Synthesis timed out\n\n"
                 return
             except Exception as e:
+                logger.bind(endpoint="/v1/audio/speech/stream", voice=speaker,
+                             chunks_sent=chunks_sent).opt(exception=True).error("Stream synthesis failed")
                 yield f"data: [ERROR] {str(e)}\n\n"
                 return
 
         yield "data: [DONE]\n\n"
+        logger.bind(endpoint="/v1/audio/speech/stream", voice=speaker,
+                     language=language, sentences=len(sentences), chunks_sent=chunks_sent,
+                     chars=len(text), total_ms=round((time.perf_counter() - t_stream_start) * 1000),
+                     ).info("stream_complete")
 
     return StreamingResponse(
         generate(),
@@ -1065,6 +1121,8 @@ async def clone_voice(
     t_start = time.perf_counter()
 
     if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
+        logger.bind(endpoint="/v1/audio/speech/clone",
+                     queue_depth=_queue_depth).warning("Request rejected: queue full")
         raise HTTPException(
             status_code=503,
             detail=f"Server busy: {_queue_depth} requests queued. Try again later.",
@@ -1074,6 +1132,7 @@ async def clone_voice(
     await _ensure_model_loaded()
 
     if not input or not input.strip():
+        logger.bind(endpoint="/v1/audio/speech/clone").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     _queue_depth += 1
@@ -1138,10 +1197,13 @@ async def clone_voice(
         )
 
     except asyncio.TimeoutError:
+        logger.bind(endpoint="/v1/audio/speech/clone",
+                     timeout_s=REQUEST_TIMEOUT).error("Voice clone timed out")
         raise HTTPException(status_code=504, detail="Voice clone timed out")
     except HTTPException:
         raise
     except Exception as e:
+        logger.bind(endpoint="/v1/audio/speech/clone").opt(exception=True).error("Voice clone failed")
         raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
     finally:
         _queue_depth -= 1
@@ -1158,6 +1220,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     await _ensure_model_loaded()
 
     if not request.input or not request.input.strip():
+        logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     speaker = resolve_voice(request.voice)
@@ -1165,10 +1228,13 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     text = request.input.strip()
     sentences = _split_sentences(text)
     if not sentences:
+        logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: no sentences")
         raise HTTPException(status_code=400, detail="No sentences found in input")
 
     async def pcm_generator():
         global _last_used
+        t_pcm_start = time.perf_counter()
+        chunks_sent = 0
         for sentence in sentences:
             gen_kwargs = _build_gen_kwargs(sentence, request)
             try:
@@ -1192,10 +1258,19 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                 pcm_data = np.clip(audio_data, -1.0, 1.0)
                 pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
                 yield pcm_bytes
+                chunks_sent += 1
             except asyncio.TimeoutError:
+                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=speaker,
+                             chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("PCM stream timed out")
                 break
             except Exception:
+                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=speaker,
+                             chunks_sent=chunks_sent).opt(exception=True).error("PCM stream failed")
                 break
+        logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=speaker,
+                     language=language, sentences=len(sentences), chunks_sent=chunks_sent,
+                     chars=len(text), total_ms=round((time.perf_counter() - t_pcm_start) * 1000),
+                     ).info("pcm_stream_complete")
 
     return StreamingResponse(
         pcm_generator(),
@@ -1212,12 +1287,17 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
 @app.websocket("/v1/audio/speech/ws")
 async def ws_synthesize(websocket: WebSocket):
     """WebSocket streaming endpoint. Send JSON, receive binary PCM per sentence."""
+    ws_id = str(uuid.uuid4())[:8]
     await websocket.accept()
+    logger.bind(ws_id=ws_id, endpoint="/v1/audio/speech/ws").debug("WebSocket connected")
+    messages_handled = 0
+    t_ws_start = time.perf_counter()
     try:
         while True:
             data = await websocket.receive_json()
             text = (data.get("input") or "").strip()
             if not text:
+                logger.bind(ws_id=ws_id).debug("WebSocket empty input, skipping")
                 await websocket.send_json({"event": "error", "detail": "input is required"})
                 continue
 
@@ -1262,9 +1342,12 @@ async def ws_synthesize(websocket: WebSocket):
                 _last_used = time.time()
 
             await websocket.send_json({"event": "done"})
+            messages_handled += 1
     except WebSocketDisconnect:
-        pass
+        logger.bind(ws_id=ws_id, messages=messages_handled,
+                     duration_ms=round((time.perf_counter() - t_ws_start) * 1000)).info("WebSocket disconnected")
     except Exception as e:
+        logger.bind(ws_id=ws_id, messages=messages_handled).opt(exception=True).error("WebSocket error")
         try:
             await websocket.send_json({"event": "error", "detail": str(e)})
         except Exception:

@@ -85,6 +85,8 @@ Note: Clone tests are skipped — the CustomVoice model does not support voice c
 
 **Adaptive token budget**: `_adaptive_max_tokens()` scales `max_new_tokens` (128–2048) based on text length and CJK character ratio, avoiding fixed 2048 allocation for short inputs.
 
+**Logging**: loguru with `_InterceptHandler` routing all uvicorn/FastAPI stdlib logs. JSON (`LOG_FORMAT=json`) or human-readable (`LOG_FORMAT=text`). Structured context via `logger.bind()` on every log point. Coverage: startup config dump, cache hit/miss/eviction (DEBUG), all request errors/timeouts (ERROR with traceback), validation rejections (WARNING), streaming completion events, WebSocket lifecycle, idle watchdog triggers, inference queue dispatch decisions (DEBUG).
+
 ## Key Environment Variables
 
 | Variable | Default | Description |
