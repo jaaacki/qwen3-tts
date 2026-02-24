@@ -186,9 +186,11 @@ def _set_audio_cache(key: str, data: bytes, content_type: str) -> None:
         _audio_cache.popitem(last=False)
     _audio_cache[key] = (data, content_type)
 
-# Voice prompt cache — caches processed reference audio by content hash
+# Voice prompt cache — caches speaker embeddings by reference audio content hash
+# Uses model.create_voice_clone_prompt() to precompute the embedding once,
+# so repeat clone requests skip the encoder pass entirely.
 VOICE_CACHE_MAX = int(os.getenv("VOICE_CACHE_MAX", "32"))
-_voice_cache: OrderedDict[str, tuple[np.ndarray, int]] = OrderedDict()
+_voice_prompt_cache: OrderedDict = OrderedDict()
 _voice_cache_hits = 0
 
 # Map OpenAI-style voice names to Qwen3-TTS speakers
@@ -412,7 +414,7 @@ async def health():
         "voices": list(VOICE_MAP.keys()),
         "audio_cache_size": len(_audio_cache),
         "audio_cache_max": _AUDIO_CACHE_MAX,
-        "voice_cache_size": len(_voice_cache),
+        "voice_cache_size": len(_voice_prompt_cache),
         "voice_cache_max": VOICE_CACHE_MAX,
         "voice_cache_hits": _voice_cache_hits,
         **gpu_info,
@@ -421,10 +423,12 @@ async def health():
 
 @app.post("/cache/clear")
 async def clear_cache():
-    """Clear the audio output cache."""
-    count = len(_audio_cache)
+    """Clear the audio output cache and voice prompt cache."""
+    audio_count = len(_audio_cache)
+    voice_count = len(_voice_prompt_cache)
     _audio_cache.clear()
-    return {"cleared": count}
+    _voice_prompt_cache.clear()
+    return {"audio_cleared": audio_count, "voice_cleared": voice_count}
 
 
 def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format: str) -> tuple[bytes, str]:
@@ -630,40 +634,56 @@ def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
     return wavs, sr
 
 
-def _get_cached_ref_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
-    """Get processed reference audio from cache or process and cache it."""
+def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
+    """Return a cached voice clone prompt, or compute and cache it.
+
+    Uses model.create_voice_clone_prompt() to pre-compute the speaker embedding
+    from reference audio. The returned prompt object can be reused across
+    generate_voice_clone() calls, skipping the encoder pass entirely.
+    """
     global _voice_cache_hits
-    if VOICE_CACHE_MAX <= 0:
-        ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
-        if len(ref_audio_data.shape) > 1:
-            ref_audio_data = ref_audio_data.mean(axis=1)
-        return ref_audio_data, ref_sr
 
     cache_key = hashlib.sha256(audio_bytes).hexdigest()
-    if cache_key in _voice_cache:
-        _voice_cache_hits += 1
-        _voice_cache.move_to_end(cache_key)
-        return _voice_cache[cache_key]
 
+    if VOICE_CACHE_MAX > 0 and cache_key in _voice_prompt_cache:
+        _voice_cache_hits += 1
+        _voice_prompt_cache.move_to_end(cache_key)
+        return _voice_prompt_cache[cache_key]
+
+    # Decode audio to pass to create_voice_clone_prompt
     ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
     if len(ref_audio_data.shape) > 1:
         ref_audio_data = ref_audio_data.mean(axis=1)
 
-    _voice_cache[cache_key] = (ref_audio_data, ref_sr)
-    while len(_voice_cache) > VOICE_CACHE_MAX:
-        _voice_cache.popitem(last=False)
+    # TODO: verify API with: docker compose run --rm qwen3-tts python3 -c \
+    #   "from qwen_tts import Qwen3TTSModel; import inspect; \
+    #    print(inspect.signature(Qwen3TTSModel.create_voice_clone_prompt))"
+    prompt = model.create_voice_clone_prompt(
+        ref_audio=(ref_audio_data, ref_sr),
+        ref_text=ref_text,
+    )
 
-    return ref_audio_data, ref_sr
+    if VOICE_CACHE_MAX > 0:
+        _voice_prompt_cache[cache_key] = prompt
+        while len(_voice_prompt_cache) > VOICE_CACHE_MAX:
+            _voice_prompt_cache.popitem(last=False)
+
+    return prompt
 
 
-def _do_voice_clone(text, language, ref_audio, ref_text, gen_kwargs):
-    """Run voice clone inference. No per-request GC — let CUDA reuse cached allocations."""
+def _do_voice_clone(text, language, ref_prompt, gen_kwargs):
+    """Run voice clone inference using a pre-computed voice prompt.
+
+    No per-request GC — let CUDA reuse cached allocations.
+    """
     with torch.inference_mode():
+        # TODO: verify kwarg name with: docker compose run --rm qwen3-tts python3 -c \
+        #   "from qwen_tts import Qwen3TTSModel; import inspect; \
+        #    print(inspect.signature(Qwen3TTSModel.generate_voice_clone))"
         wavs, sr = model.generate_voice_clone(
             text=text,
             language=language,
-            ref_audio=ref_audio,
-            ref_text=ref_text,
+            ref_prompt=ref_prompt,
             **gen_kwargs,
         )
     return wavs, sr
@@ -885,18 +905,20 @@ async def clone_voice(
 
     _queue_depth += 1
     try:
-        # Read and cache reference audio
+        # Read reference audio and compute/cache speaker embedding
         audio_bytes = await file.read()
-        ref_audio_data, ref_sr = _get_cached_ref_audio(audio_bytes)
-
-        language = language or detect_language(input)
         text = input.strip()
+        language = language or detect_language(text)
         text = _normalize_text(text)
         gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(text)}
         if temperature is not None:
             gen_kwargs["temperature"] = temperature
         if top_p is not None:
             gen_kwargs["top_p"] = top_p
+
+        ref_prompt = _get_cached_voice_prompt(
+            audio_bytes, ref_text.strip() if ref_text else None
+        )
 
         t_queue = time.perf_counter()
         loop = asyncio.get_running_loop()
@@ -908,8 +930,7 @@ async def clone_voice(
                     lambda: _do_voice_clone(
                         text,
                         language,
-                        (ref_audio_data, ref_sr),
-                        ref_text.strip() if ref_text else None,
+                        ref_prompt,
                         gen_kwargs,
                     )
                 ),
