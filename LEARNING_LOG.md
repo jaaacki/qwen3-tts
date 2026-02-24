@@ -4,6 +4,23 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0023 — Priority inference queue: why a semaphore is not enough
+**Date**: 2026-02-24
+**Type**: What just happened
+**Related**: Issue #81 — Replace inference semaphore with priority queue
+
+The original server used `asyncio.Semaphore(1)` to serialize GPU inference. This was correct for preventing OOM, but it treated all requests equally. A 10-sentence batch REST request and a real-time WebSocket stream competing for the semaphore had equal chances of acquiring it. For a TTS server serving both interactive clients (WebSocket, SSE streaming, raw PCM) and bulk callers (REST `/v1/audio/speech`), this is wrong. A user on a phone call hearing silence while their stream waits behind a batch job is a perceptible quality regression.
+
+The replacement is a `PriorityInferQueue` backed by `heapq` (stdlib min-heap). Jobs are `@dataclass(order=True)` with `(priority, submit_time)` as the sort key. Lower priority number means higher urgency: `PRIORITY_REALTIME=0` for streaming endpoints, `PRIORITY_BATCH=1` for REST. When multiple jobs are queued, the worker always pops the lowest-priority-number job first. Within the same priority level, `submit_time` (monotonic clock) ensures FIFO ordering.
+
+The queue uses `asyncio.Lock` (not a threading lock) because all heap mutations happen in async code. An `asyncio.Event` wakes the worker when new jobs arrive, avoiding busy-waiting. The worker runs `loop.run_in_executor()` on the same single-thread `_infer_executor`, preserving the guarantee that only one GPU inference runs at a time.
+
+The key design choice was keeping the queue as a module-level singleton (`_infer_queue`) started from `lifespan()`. This matches the existing pattern for `_idle_watchdog` and keeps the startup/shutdown lifecycle centralized. Each endpoint simply calls `await _infer_queue.submit(fn, priority=...)` instead of `async with _infer_semaphore:` followed by `loop.run_in_executor(...)`.
+
+Five sites were updated: `synthesize_speech` (batch), `synthesize_speech_stream` (realtime), `clone_voice` (batch), `synthesize_speech_stream_pcm` (realtime), and `ws_synthesize` (realtime). The `loop = asyncio.get_running_loop()` lines at those sites were removed since the queue handles the executor call internally.
+
+---
+
 ## Entry 0012 — GPU memory pool pre-warming and CUDA allocator tuning
 **Date**: 2026-02-20
 **Type**: Why this design

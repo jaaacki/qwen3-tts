@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased — Issue #81: priority queue] — 2026-02-24
+
+### Changed
+- Replaced `asyncio.Semaphore(1)` inference serialization with `PriorityInferQueue` min-heap (#81)
+- WebSocket, SSE, and raw PCM streaming endpoints now run at `PRIORITY_REALTIME=0`
+- REST `/v1/audio/speech` and `/v1/audio/speech/clone` run at `PRIORITY_BATCH=1`
+- Under mixed load, real-time streaming clients are always dispatched before batch REST callers
+
+---
+
 ## v0.6.0 — 2026-02-20
 
 Phase 3 Production Grade complete. All 36 roadmap issues implemented.
