@@ -84,9 +84,20 @@ def audio_duration_from_wav(data: bytes) -> Optional[float]:
     header = parse_wav_header(data)
     if header is None:
         return None
-    # data chunk starts after the 44-byte header (PCM case)
+    # Walk RIFF chunks to find the "data" chunk (handles non-standard headers
+    # where extra chunks like LIST appear between fmt and data).
     try:
-        data_size = struct.unpack_from("<I", data, 40)[0]
+        offset = 12  # skip RIFF header (4 ID + 4 size + 4 WAVE)
+        data_size = None
+        while offset + 8 <= len(data):
+            chunk_id = data[offset:offset + 4]
+            chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
+            if chunk_id == b"data":
+                data_size = chunk_size
+                break
+            offset += 8 + chunk_size
+        if data_size is None:
+            return None
         bytes_per_sample = header["bit_depth"] // 8
         if bytes_per_sample == 0 or header["channels"] == 0:
             return None

@@ -40,11 +40,11 @@ class TestSSEStream:
         with TTSHTTPClient() as client:
             events = client.synthesize_stream(TEXT)
 
-        audio_events = [e for e in events if "audio" in e]
+        audio_events = [e for e in events if "raw" in e and e["raw"] != "[DONE]"]
         assert len(audio_events) > 0, "No audio events in SSE stream"
 
         for ev in audio_events:
-            raw_b64 = ev["audio"]
+            raw_b64 = ev["raw"]
             assert isinstance(raw_b64, str)
             decoded = base64.b64decode(raw_b64)
             assert len(decoded) > 0

@@ -23,6 +23,7 @@ TEXT = "This is a voice cloning test."
 class TestVoiceClone:
     """Basic voice clone functionality."""
 
+    @pytest.mark.skip(reason="CustomVoice model does not support voice cloning (#103)")
     def test_clone_returns_audio(self, ensure_server, ensure_model_loaded, ref_audio_3s: Path):
         """Clone endpoint returns non-empty audio bytes."""
         with TTSHTTPClient() as client:
@@ -33,6 +34,7 @@ class TestVoiceClone:
         print(f"Voice: clone")
         print(f"Format: wav")
 
+    @pytest.mark.skip(reason="CustomVoice model does not support voice cloning (#103)")
     def test_clone_response_is_valid_wav(
         self, ensure_server, ensure_model_loaded, ref_audio_3s: Path
     ):
@@ -41,6 +43,7 @@ class TestVoiceClone:
             audio = client.clone(ref_audio_3s, input=TEXT, response_format="wav")
         assert is_valid_wav(audio), "Clone response is not valid WAV"
 
+    @pytest.mark.skip(reason="CustomVoice model does not support voice cloning (#103)")
     def test_clone_with_ref_text(
         self, ensure_server, ensure_model_loaded, ref_audio_3s: Path
     ):
@@ -53,6 +56,7 @@ class TestVoiceClone:
             )
         assert len(audio) > 0
 
+    @pytest.mark.skip(reason="CustomVoice model does not support voice cloning (#103)")
     def test_clone_with_language(
         self, ensure_server, ensure_model_loaded, ref_audio_3s: Path
     ):
@@ -91,6 +95,7 @@ class TestVoiceClone:
 class TestVoiceCloneCache:
     """Voice prompt cache hit tests (second call with same ref audio is faster)."""
 
+    @pytest.mark.skip(reason="CustomVoice model does not support voice cloning (#103)")
     def test_clone_cache_hit(
         self, ensure_server, ensure_model_loaded, ref_audio_5s: Path
     ):
