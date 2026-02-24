@@ -418,7 +418,6 @@ def _load_model_sync():
     # Compile model for faster inference (PyTorch 2.0+)
     if os.getenv("TORCH_COMPILE", "true").lower() == "true":
         try:
-            import torch._dynamo  # noqa: F401
             model.model = torch.compile(model.model, mode="reduce-overhead", fullgraph=False)
             print("torch.compile enabled on model (mode=reduce-overhead)")
         except Exception as e:
@@ -887,23 +886,23 @@ async def synthesize_speech(request: TTSRequest):
     text = request.input.strip()
     _queue_depth += 1
 
-    # Fast path: return cached audio without touching the GPU
-    cache_key = _audio_cache_key(
-        text, speaker, request.speed, request.response_format, request.language or "", request.instruct or ""
-    )
-    cached = _get_audio_cache(cache_key)
-    if cached is not None:
-        return Response(
-            content=cached[0],
-            media_type=cached[1],
-            headers={
-                "Content-Disposition": f'attachment; filename="speech.{request.response_format}"'
-            },
-        )
-
-    await _ensure_model_loaded()
-
     try:
+        # Fast path: return cached audio without touching the GPU
+        cache_key = _audio_cache_key(
+            text, speaker, request.speed, request.response_format, request.language or "", request.instruct or ""
+        )
+        cached = _get_audio_cache(cache_key)
+        if cached is not None:
+            return Response(
+                content=cached[0],
+                media_type=cached[1],
+                headers={
+                    "Content-Disposition": f'attachment; filename="speech.{request.response_format}"'
+                },
+            )
+
+        await _ensure_model_loaded()
+
         language = request.language or detect_language(request.input)
         text = _normalize_text(text)
         gen_kwargs = _build_gen_kwargs(text, request)
