@@ -4,6 +4,33 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0021 — Why VAD doesn't belong in a TTS pipeline
+**Date**: 2026-02-24
+**Type**: What could go wrong
+**Related**: Issue #100 — Remove VAD trim from TTS pipeline
+
+Voice Activity Detection (VAD) finds speech in recordings that contain a mix of speech, silence, and background noise. TTS output is none of those things — it's synthesized audio that the model generated on purpose. Running VAD on TTS output is applying a recording-analysis tool to a signal-generation output. The failure mode is that VAD can aggressively trim valid speech content (soft consonants, trailing words) because it was designed to detect human speech patterns in noisy environments, not to quality-check a model's output. If the model generates silence padding, the right fix is at the model output level, not a post-hoc recording analyzer. Removed entirely — audio is returned as-is after speed adjustment and encoding.
+
+---
+
+## Entry 0020 — Multi-stage Docker builds with conda base images
+**Date**: 2026-02-24
+**Type**: What could go wrong
+**Related**: Issue #94 — Docker build fails
+
+The `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` image uses conda, not system Python. Python lives at `/opt/conda/bin/python` and packages at `/opt/conda/lib/python3.11/site-packages/`. The standard multi-stage pattern of `pip install --prefix=/install` then `COPY --from=builder /install /usr/local` fails silently — packages land in `/usr/local/lib/python3.11/site-packages/` which conda's Python doesn't search. The fix is to COPY directly into the conda tree: `/opt/conda/lib/python3.11/site-packages/` for packages and `/opt/conda/bin/` for scripts. Additionally, `torchao` versions must match the base torch version exactly (0.5.x for torch 2.5.x), and even compatible torchao versions can break newer transformers due to missing quantization APIs.
+
+---
+
+## Entry 0019 — Queue depth counters must cover all exit paths
+**Date**: 2026-02-24
+**Type**: What could go wrong
+**Related**: Issue #97 — Queue depth counter leaks on cache hits
+
+The `_queue_depth += 1` counter was placed before both the cache-hit early-return and the `_ensure_model_loaded()` call, but only the `try/finally` around the inference block decremented it. Cache hits returned early without decrementing, and model-load failures raised exceptions that bypassed the finally block. After a few cache hits, `_queue_depth` permanently reached `MAX_QUEUE_DEPTH` and every subsequent request got 503. The fix: wrap everything after the increment in a single `try/finally`. The aha moment is that any counter increment must be immediately followed by its decrement guarantee — never separated by any code that might exit early or raise.
+
+---
+
 ## Entry 0017 — Batch inference: draining the queue for free GPU utilization
 **Date**: 2026-02-24
 **Type**: Why this design

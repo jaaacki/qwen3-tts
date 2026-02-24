@@ -37,6 +37,17 @@ TTS_URL=http://host:port python test_tts.py  # Test against different host
 
 `test_tts.py` uses a custom pass/fail reporter, not pytest. `server_test.py` mocks `qwen_tts` at import time to avoid loading the actual model.
 
+E2E tests (require running server + GPU):
+
+```bash
+pytest E2Etest/ -v                  # Full E2E suite
+pytest E2Etest/ -v -m smoke         # Smoke tests only (no inference)
+pytest E2Etest/ -v -m "not slow"    # Skip slow tests
+./E2Etest/run_tests.sh --with-server  # Auto-start/stop server
+```
+
+Note: Clone tests are skipped — the CustomVoice model does not support voice cloning.
+
 ## Architecture
 
 **Single-file server** (`server.py`): All API logic, model management, and audio processing in one file. No separate modules.
@@ -50,10 +61,9 @@ TTS_URL=http://host:port python test_tts.py  # Test against different host
 4. `detect_language()` — fasttext if installed, else Unicode heuristic
 5. `_normalize_text()` — expand numbers, currency, abbreviations
 6. `_do_synthesize()` in `_infer_executor` under `_infer_semaphore`
-7. `_trim_silence()` — VAD trimming (configurable)
-8. `_adjust_speed()` — pyrubberband (pitch-preserving) or scipy fallback
-9. `_encode_audio_async()` — format conversion in `_encode_executor`
-10. Cache result and return
+7. `_adjust_speed()` — pyrubberband (pitch-preserving) or scipy fallback
+8. `_encode_audio_async()` — format conversion in `_encode_executor`
+9. Cache result and return
 
 **Endpoints**:
 - `POST /v1/audio/speech` — JSON body, OpenAI-compatible TTS (buffered, full audio)
@@ -69,7 +79,7 @@ TTS_URL=http://host:port python test_tts.py  # Test against different host
 - `_audio_cache` — LRU `OrderedDict` keyed by SHA-256 of `(text, voice, speed, format, language, instruct)`. Size controlled by `AUDIO_CACHE_MAX` (default 256). Skips GPU entirely on hit.
 - `_voice_cache` — LRU cache of decoded reference audio (numpy arrays) keyed by SHA-256 of raw audio bytes. Size controlled by `VOICE_CACHE_MAX` (default 32).
 
-**Voice mapping**: `VOICE_MAP` maps both native Qwen speaker names (`vivian`, `serena`, `uncle_fu`, `dylan`, `eric`, `ryan`, `aiden`, `ono_anna`, `sohee`) and OpenAI-style aliases (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`) to Qwen speakers. Unknown voice names pass through as-is.
+**Voice mapping**: `VOICE_MAP` maps both native Qwen speaker names (`vivian`, `serena`, `uncle_fu`, `dylan`, `eric`, `ryan`, `aiden`, `ono_anna`, `sohee`) and OpenAI-style aliases (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`) to Qwen speakers. Unknown voice names return 400 with a list of valid voices.
 
 **Model loading**: Uses `flash_attention_2` if `flash-attn` is installed, falls back to `sdpa`. After loading, runs multi-length GPU warmup and pre-warms CUDA memory pool. `torch.compile(mode="reduce-overhead")` is applied unless `TORCH_COMPILE=false`.
 
@@ -86,7 +96,6 @@ TTS_URL=http://host:port python test_tts.py  # Test against different host
 | `TORCH_COMPILE` | `true` | Enable `torch.compile` on the model |
 | `PROMETHEUS_ENABLED` | `true` | Expose `/metrics` endpoint |
 | `LOG_FORMAT` | `json` | `json` or `text` log format |
-| `VAD_TRIM` | `true` | Strip leading/trailing silence |
 | `TEXT_NORMALIZE` | `true` | Expand numbers, currency, abbreviations |
 | `MAX_QUEUE_DEPTH` | `5` | 503 early rejection threshold (0 = unlimited) |
 | `AUDIO_CACHE_MAX` | `256` | Max cached audio outputs (0 = disabled) |

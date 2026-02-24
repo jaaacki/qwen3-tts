@@ -22,8 +22,8 @@ pydub==0.25.1
 scipy==1.14.1
 
 # Model loading
-accelerate==1.1.1
+accelerate==1.12.0
 
 # Optional quantization (required only when QUANTIZE=int8 or QUANTIZE=fp8)
-bitsandbytes>=0.43.0
-torchao>=0.5.0
+# Installed separately in Dockerfile with || true — keep out of main deps
+# to avoid version conflicts with base torch (bitsandbytes, torchao)
