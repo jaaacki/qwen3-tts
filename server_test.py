@@ -793,3 +793,60 @@ class TestPriorityInferQueue:
         assert server.PRIORITY_REALTIME == 0
         assert server.PRIORITY_BATCH == 1
         assert server.PRIORITY_REALTIME < server.PRIORITY_BATCH
+
+
+# --- Issue #85: Gateway/Worker mode tests ---
+
+# Mock aiohttp if not installed (it's a Docker-only dependency)
+try:
+    import aiohttp as _aiohttp_check  # noqa: F401
+except ImportError:
+    sys.modules["aiohttp"] = MagicMock()
+
+import gateway  # noqa: E402
+
+
+class TestGateway:
+    """Gateway proxies requests to worker and manages worker subprocess lifecycle."""
+
+    def test_worker_process_none_at_start(self):
+        """_worker_process is None before any request is received."""
+        assert gateway._worker_process is None
+
+    def test_check_idle_kills_worker_after_timeout(self):
+        """_check_idle kills the worker when last_used is older than IDLE_TIMEOUT."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # process is running
+
+        with patch.object(gateway, "_worker_process", mock_proc, create=True), \
+             patch.object(gateway, "_last_used", 0.0, create=True), \
+             patch.object(gateway, "IDLE_TIMEOUT", 120), \
+             patch("time.time", return_value=200.0):
+            asyncio.run(gateway._check_idle())
+
+        mock_proc.kill.assert_called_once()
+
+    def test_check_idle_noop_when_no_worker(self):
+        """_check_idle does nothing when _worker_process is None."""
+        with patch.object(gateway, "_worker_process", None, create=True):
+            asyncio.run(gateway._check_idle())  # should not raise
+
+    def test_check_idle_noop_when_idle_timeout_zero(self):
+        """IDLE_TIMEOUT=0 disables idle killing."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        with patch.object(gateway, "_worker_process", mock_proc, create=True), \
+             patch.object(gateway, "_last_used", 0.0, create=True), \
+             patch.object(gateway, "IDLE_TIMEOUT", 0), \
+             patch("time.time", return_value=99999.0):
+            asyncio.run(gateway._check_idle())
+        mock_proc.kill.assert_not_called()
+
+    def test_check_idle_clears_dead_process(self):
+        """If worker process has already exited, _worker_process is set to None."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # process exited
+        with patch.object(gateway, "_worker_process", mock_proc, create=True):
+            asyncio.run(gateway._check_idle())
+        # Should clear _worker_process without calling kill
+        mock_proc.kill.assert_not_called()
