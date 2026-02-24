@@ -204,14 +204,14 @@ class PriorityInferQueue:
                 if batch_jobs:
                     texts = [j.batch_args["text"] for j in batch_jobs]
                     langs = [j.batch_args["language"] for j in batch_jobs]
-                    speakers = [j.batch_args["speaker"] for j in batch_jobs]
+                    voice_files = [j.batch_args["speaker"] for j in batch_jobs]
                     kwargs_list = [j.batch_args["gen_kwargs"] for j in batch_jobs]
                     logger.debug("Queue dispatching batch", batch_size=len(batch_jobs),
                                  remaining=len(self._heap))
                     try:
                         wavs, srs = await loop.run_in_executor(
                             self._infer_executor,
-                            lambda: _do_synthesize_batch(texts, langs, speakers, kwargs_list),
+                            lambda: _do_synthesize_batch(texts, langs, voice_files, kwargs_list),
                         )
                         sr = srs[0] if isinstance(srs, list) else srs
                         for job, wav in zip(batch_jobs, wavs):
@@ -340,31 +340,34 @@ logger.bind(
     VOICE_CACHE_MAX=VOICE_CACHE_MAX,
 ).info("Server configuration loaded")
 
-# Map OpenAI-style voice names to Qwen3-TTS speakers
+# Reference audio directory — each voice is backed by a pre-generated WAV file
+_VOICES_DIR = os.path.join(os.path.dirname(__file__), "voices")
+
+# Map voice names to reference audio filenames (Base model uses voice cloning)
 VOICE_MAP = {
-    # Direct Qwen speaker names
-    "vivian": "vivian",
-    "serena": "serena",
-    "uncle_fu": "uncle_fu",
-    "dylan": "dylan",
-    "eric": "eric",
-    "ryan": "ryan",
-    "aiden": "aiden",
-    "ono_anna": "ono_anna",
-    "sohee": "sohee",
+    # Direct Qwen speaker names → reference WAV files
+    "vivian": "vivian.wav",
+    "serena": "serena.wav",
+    "uncle_fu": "uncle_fu.wav",
+    "dylan": "dylan.wav",
+    "eric": "eric.wav",
+    "ryan": "ryan.wav",
+    "aiden": "aiden.wav",
+    "ono_anna": "ono_anna.wav",
+    "sohee": "sohee.wav",
     # OpenAI-compatible aliases
-    "alloy": "ryan",
-    "echo": "aiden",
-    "fable": "dylan",
-    "onyx": "uncle_fu",
-    "nova": "vivian",
-    "shimmer": "serena",
+    "alloy": "ryan.wav",
+    "echo": "aiden.wav",
+    "fable": "dylan.wav",
+    "onyx": "uncle_fu.wav",
+    "nova": "vivian.wav",
+    "shimmer": "serena.wav",
 }
 
-DEFAULT_VOICE = "vivian"
+DEFAULT_VOICE = "vivian.wav"
 
-# Set of known model speakers (used for validation)
-KNOWN_SPEAKERS = set(VOICE_MAP.values())
+# Pre-computed voice clone prompts — populated during model load
+_voice_prompts: dict = {}  # voice_file → list[VoiceClonePromptItem]
 
 
 class TTSRequest(BaseModel):
@@ -429,7 +432,7 @@ def _load_model_sync():
     if model is not None:
         return
 
-    model_id = os.getenv("MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+    model_id = os.getenv("MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
     loaded_model_id = model_id
 
     # Prefer flash_attention_2 on Ampere+ GPUs; fall back to sdpa
@@ -463,9 +466,22 @@ def _load_model_sync():
         except Exception as e:
             logger.warning("torch.compile not available or failed: {}", e)
 
+    # Pre-compute voice clone prompts from reference audio files
+    logger.info("Pre-computing voice prompts from reference audio")
+    for voice_file in sorted(set(VOICE_MAP.values())):
+        path = os.path.join(_VOICES_DIR, voice_file)
+        if os.path.exists(path):
+            prompts = model.create_voice_clone_prompt(ref_audio=path, x_vector_only_mode=True)
+            _voice_prompts[voice_file] = prompts
+            logger.bind(voice=voice_file).debug("Voice prompt computed")
+        else:
+            logger.bind(voice=voice_file, path=path).warning("Reference audio not found, skipping")
+    logger.bind(voices=len(_voice_prompts)).info("Voice prompts ready")
+
     # Multi-length warmup to pre-cache CUDA kernels for different input sizes
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and _voice_prompts:
         logger.info("Warming up GPU with multi-length synthesis")
+        warmup_prompt = next(iter(_voice_prompts.values()))
         warmup_texts = [
             "Hello.",                                       # ~5 tokens — short prompt path
             "Hello, how are you doing today?",              # ~20 tokens — medium
@@ -474,10 +490,10 @@ def _load_model_sync():
         for text in warmup_texts:
             try:
                 with torch.inference_mode():
-                    model.generate_custom_voice(
+                    model.generate_voice_clone(
                         text=text,
                         language="English",
-                        speaker="vivian",
+                        voice_clone_prompt=warmup_prompt,
                         max_new_tokens=256,
                     )
                 logger.bind(chars=len(text)).debug("Warmup synthesis complete")
@@ -514,6 +530,7 @@ def _unload_model_sync():
         return
 
     logger.info("Unloading model (idle timeout)")
+    _voice_prompts.clear()
     del model
     model = None
     if _prometheus_available:
@@ -674,17 +691,17 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
 
 
 def resolve_voice(voice: Optional[str]) -> str:
-    """Resolve a voice name to a Qwen3-TTS speaker name.
+    """Resolve a voice name to a reference audio WAV filename.
 
-    Raises HTTPException 400 if the resolved voice is not a known model speaker.
+    Raises HTTPException 400 if the voice is not in VOICE_MAP.
     """
     if not voice:
         return DEFAULT_VOICE
     voice_lower = voice.lower().replace(" ", "_")
-    resolved = VOICE_MAP.get(voice_lower, voice_lower)
-    if resolved not in KNOWN_SPEAKERS:
+    resolved = VOICE_MAP.get(voice_lower)
+    if resolved is None:
         valid = sorted(VOICE_MAP.keys())
-        logger.bind(voice=voice, resolved=resolved).warning("Unknown voice requested")
+        logger.bind(voice=voice).warning("Unknown voice requested")
         raise HTTPException(
             status_code=400,
             detail=f"Unknown voice '{voice}'. Valid voices: {', '.join(valid)}",
@@ -807,28 +824,35 @@ def _split_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
-def _do_synthesize(text, language, speaker, gen_kwargs, instruct=None):
-    """Run TTS inference. No per-request GC — let CUDA reuse cached allocations."""
+def _do_synthesize(text, language, voice_file, gen_kwargs, instruct=None):
+    """Run TTS inference via voice cloning with pre-computed prompts.
+
+    No per-request GC — let CUDA reuse cached allocations.
+    ``instruct`` is accepted for API backwards-compat but ignored (Base model
+    does not support it).
+    """
+    prompt = _voice_prompts[voice_file]
     with torch.inference_mode():
-        wavs, sr = model.generate_custom_voice(
+        wavs, sr = model.generate_voice_clone(
             text=text,
             language=language,
-            speaker=speaker,
-            instruct=instruct,
+            voice_clone_prompt=prompt,
             **gen_kwargs,
         )
     return wavs, sr
 
 
-def _do_synthesize_batch(texts: list[str], languages: list[str], speakers: list[str], gen_kwargs_list: list[dict]) -> tuple[list, list]:
-    """Run batched TTS inference. All items share the max max_new_tokens."""
+def _do_synthesize_batch(texts: list[str], languages: list[str], voice_files: list[str], gen_kwargs_list: list[dict]) -> tuple[list, list]:
+    """Run batched TTS inference via voice cloning. All items share the max max_new_tokens."""
     max_tokens = max(k.get("max_new_tokens", 2048) for k in gen_kwargs_list)
     extra = {k: v for k, v in gen_kwargs_list[0].items() if k != "max_new_tokens"}
+    # Flatten: each _voice_prompts[vf] is [VoiceClonePromptItem]; API expects a flat list
+    prompts = [_voice_prompts[vf][0] for vf in voice_files]
     with torch.inference_mode():
-        wavs, sr = model.generate_custom_voice(
+        wavs, sr = model.generate_voice_clone(
             text=texts,
             language=languages,
-            speaker=speakers,
+            voice_clone_prompt=prompts,
             max_new_tokens=max_tokens,
             **extra,
         )
@@ -858,12 +882,12 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
     if len(ref_audio_data.shape) > 1:
         ref_audio_data = ref_audio_data.mean(axis=1)
 
-    # TODO: verify API with: docker compose run --rm qwen3-tts python3 -c \
-    #   "from qwen_tts import Qwen3TTSModel; import inspect; \
-    #    print(inspect.signature(Qwen3TTSModel.create_voice_clone_prompt))"
+    # x_vector_only_mode=True extracts speaker embedding without needing ref_text;
+    # when ref_text is provided, use ICL mode (x_vector_only_mode=False) for better quality
     prompt = model.create_voice_clone_prompt(
         ref_audio=(ref_audio_data, ref_sr),
         ref_text=ref_text,
+        x_vector_only_mode=(ref_text is None),
     )
 
     if VOICE_CACHE_MAX > 0:
@@ -883,13 +907,10 @@ def _do_voice_clone(text, language, ref_prompt, gen_kwargs):
     No per-request GC — let CUDA reuse cached allocations.
     """
     with torch.inference_mode():
-        # TODO: verify kwarg name with: docker compose run --rm qwen3-tts python3 -c \
-        #   "from qwen_tts import Qwen3TTSModel; import inspect; \
-        #    print(inspect.signature(Qwen3TTSModel.generate_voice_clone))"
         wavs, sr = model.generate_voice_clone(
             text=text,
             language=language,
-            ref_prompt=ref_prompt,
+            voice_clone_prompt=ref_prompt,
             **gen_kwargs,
         )
     return wavs, sr
@@ -906,7 +927,7 @@ async def _encode_audio_async(audio_data, sample_rate, output_format):
 
 @app.post("/v1/audio/speech")
 async def synthesize_speech(request: TTSRequest):
-    """OpenAI-compatible TTS endpoint using CustomVoice model."""
+    """OpenAI-compatible TTS endpoint using Base model with voice cloning."""
     global _queue_depth
 
     request_id = str(uuid.uuid4())[:8]
@@ -926,19 +947,24 @@ async def synthesize_speech(request: TTSRequest):
         logger.bind(request_id=request_id, endpoint="/v1/audio/speech").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
-    speaker = resolve_voice(request.voice)
+    if request.instruct:
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech").warning(
+            "instruct parameter ignored — Base model does not support instruct"
+        )
+
+    voice_file = resolve_voice(request.voice)
     text = request.input.strip()
     _queue_depth += 1
 
     try:
         # Fast path: return cached audio without touching the GPU
         cache_key = _audio_cache_key(
-            text, speaker, request.speed, request.response_format, request.language or "", request.instruct or ""
+            text, voice_file, request.speed, request.response_format, request.language or "", request.instruct or ""
         )
         cached = _get_audio_cache(cache_key)
         if cached is not None:
             logger.bind(request_id=request_id, endpoint="/v1/audio/speech",
-                        voice=speaker, chars=len(text), format=request.response_format,
+                        voice=voice_file, chars=len(text), format=request.response_format,
                         total_ms=round((time.perf_counter() - t_start) * 1000),
                         ).info("synthesis_cache_hit")
             return Response(
@@ -957,22 +983,12 @@ async def synthesize_speech(request: TTSRequest):
 
         t_queue = time.perf_counter()
         t_queue_done = time.perf_counter()
-        if request.instruct:
-            # instruct not supported in batch path — use single dispatch
-            wavs, sr = await asyncio.wait_for(
-                _infer_queue.submit(
-                    lambda: _do_synthesize(text, language, speaker, gen_kwargs, instruct=request.instruct),
-                    priority=PRIORITY_BATCH,
-                ),
-                timeout=REQUEST_TIMEOUT,
-            )
-        else:
-            wavs, sr = await asyncio.wait_for(
-                _infer_queue.submit_batch(
-                    text=text, language=language, speaker=speaker, gen_kwargs=gen_kwargs,
-                ),
-                timeout=REQUEST_TIMEOUT,
-            )
+        wavs, sr = await asyncio.wait_for(
+            _infer_queue.submit_batch(
+                text=text, language=language, speaker=voice_file, gen_kwargs=gen_kwargs,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
         t_infer_done = time.perf_counter()
 
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
@@ -989,7 +1005,7 @@ async def synthesize_speech(request: TTSRequest):
         logger.bind(
             request_id=request_id,
             endpoint="/v1/audio/speech",
-            voice=speaker,
+            voice=voice_file,
             language=language,
             chars=len(text),
             format=request.response_format,
@@ -1002,7 +1018,7 @@ async def synthesize_speech(request: TTSRequest):
         _set_audio_cache(cache_key, audio_bytes, content_type)
 
         if _prometheus_available:
-            tts_requests_total.labels(voice=speaker, format=request.response_format).inc()
+            tts_requests_total.labels(voice=voice_file, format=request.response_format).inc()
             tts_inference_duration.observe(t_infer_done - t_queue_done)
 
         return Response(
@@ -1036,7 +1052,7 @@ async def synthesize_speech_stream(request: TTSRequest):
         logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
-    speaker = resolve_voice(request.voice)
+    voice_file = resolve_voice(request.voice)
     language = request.language or detect_language(request.input)
     text = request.input.strip()
     sentences = _split_sentences(text)
@@ -1054,8 +1070,7 @@ async def synthesize_speech_stream(request: TTSRequest):
                 wavs, sr = await asyncio.wait_for(
                     _infer_queue.submit(
                         lambda s=sentence: _do_synthesize(
-                            s, language, speaker, gen_kwargs,
-                            instruct=request.instruct,
+                            s, language, voice_file, gen_kwargs,
                         ),
                         priority=PRIORITY_REALTIME,
                     ),
@@ -1079,18 +1094,18 @@ async def synthesize_speech_stream(request: TTSRequest):
                 _last_used = time.time()
 
             except asyncio.TimeoutError:
-                logger.bind(endpoint="/v1/audio/speech/stream", voice=speaker,
+                logger.bind(endpoint="/v1/audio/speech/stream", voice=voice_file,
                              chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("Stream synthesis timed out")
                 yield "data: [ERROR] Synthesis timed out\n\n"
                 return
             except Exception as e:
-                logger.bind(endpoint="/v1/audio/speech/stream", voice=speaker,
+                logger.bind(endpoint="/v1/audio/speech/stream", voice=voice_file,
                              chunks_sent=chunks_sent).opt(exception=True).error("Stream synthesis failed")
                 yield f"data: [ERROR] {str(e)}\n\n"
                 return
 
         yield "data: [DONE]\n\n"
-        logger.bind(endpoint="/v1/audio/speech/stream", voice=speaker,
+        logger.bind(endpoint="/v1/audio/speech/stream", voice=voice_file,
                      language=language, sentences=len(sentences), chunks_sent=chunks_sent,
                      chars=len(text), total_ms=round((time.perf_counter() - t_stream_start) * 1000),
                      ).info("stream_complete")
@@ -1223,7 +1238,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
         logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
-    speaker = resolve_voice(request.voice)
+    voice_file = resolve_voice(request.voice)
     language = request.language or detect_language(request.input)
     text = request.input.strip()
     sentences = _split_sentences(text)
@@ -1241,7 +1256,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                 wavs, sr = await asyncio.wait_for(
                     _infer_queue.submit(
                         lambda s=sentence: _do_synthesize(
-                            s, language, speaker, gen_kwargs
+                            s, language, voice_file, gen_kwargs
                         ),
                         priority=PRIORITY_REALTIME,
                     ),
@@ -1260,14 +1275,14 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                 yield pcm_bytes
                 chunks_sent += 1
             except asyncio.TimeoutError:
-                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=speaker,
+                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                              chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("PCM stream timed out")
                 break
             except Exception:
-                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=speaker,
+                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                              chunks_sent=chunks_sent).opt(exception=True).error("PCM stream failed")
                 break
-        logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=speaker,
+        logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                      language=language, sentences=len(sentences), chunks_sent=chunks_sent,
                      chars=len(text), total_ms=round((time.perf_counter() - t_pcm_start) * 1000),
                      ).info("pcm_stream_complete")
@@ -1301,7 +1316,7 @@ async def ws_synthesize(websocket: WebSocket):
                 await websocket.send_json({"event": "error", "detail": "input is required"})
                 continue
 
-            voice = resolve_voice(data.get("voice"))
+            voice_file = resolve_voice(data.get("voice"))
             language = data.get("language") or detect_language(text)
             speed = float(data.get("speed", 1.0))
             ws_temperature = data.get("temperature")
@@ -1321,7 +1336,7 @@ async def ws_synthesize(websocket: WebSocket):
                     gen_kwargs["top_p"] = float(ws_top_p)
                 wavs, sr = await asyncio.wait_for(
                     _infer_queue.submit(
-                        lambda s=sentence: _do_synthesize(s, language, voice, gen_kwargs),
+                        lambda s=sentence: _do_synthesize(s, language, voice_file, gen_kwargs),
                         priority=PRIORITY_REALTIME,
                     ),
                     timeout=REQUEST_TIMEOUT,

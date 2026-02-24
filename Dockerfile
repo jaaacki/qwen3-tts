@@ -51,6 +51,7 @@ COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY server.py /app/server.py
 COPY gateway.py /app/gateway.py
 COPY worker.py /app/worker.py
+COPY voices/ /app/voices/
 
 EXPOSE 8000
 

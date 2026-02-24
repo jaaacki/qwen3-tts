@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenAI-compatible TTS API server wrapping [Qwen3-TTS-0.6B](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice). Single-file FastAPI server (`server.py`) containerized with Docker and NVIDIA GPU acceleration. Designed for shared GPU environments with on-demand model loading/unloading.
+OpenAI-compatible TTS API server wrapping [Qwen3-TTS-0.6B](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base). Single-file FastAPI server (`server.py`) containerized with Docker and NVIDIA GPU acceleration. Designed for shared GPU environments with on-demand model loading/unloading. Supports both named voices (via pre-generated reference audio) and voice cloning from user-provided audio.
 
 ## Build & Run
 
@@ -46,7 +46,7 @@ pytest E2Etest/ -v -m "not slow"    # Skip slow tests
 ./E2Etest/run_tests.sh --with-server  # Auto-start/stop server
 ```
 
-Note: Clone tests are skipped — the CustomVoice model does not support voice cloning.
+Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloning inference.
 
 ## Architecture
 
@@ -77,11 +77,15 @@ Note: Clone tests are skipped — the CustomVoice model does not support voice c
 
 **Caching**:
 - `_audio_cache` — LRU `OrderedDict` keyed by SHA-256 of `(text, voice, speed, format, language, instruct)`. Size controlled by `AUDIO_CACHE_MAX` (default 256). Skips GPU entirely on hit.
-- `_voice_cache` — LRU cache of decoded reference audio (numpy arrays) keyed by SHA-256 of raw audio bytes. Size controlled by `VOICE_CACHE_MAX` (default 32).
+- `_voice_prompt_cache` — LRU cache of pre-computed voice clone prompts (speaker embeddings) keyed by SHA-256 of raw audio bytes. Used by `/clone` endpoint. Size controlled by `VOICE_CACHE_MAX` (default 32).
 
-**Voice mapping**: `VOICE_MAP` maps both native Qwen speaker names (`vivian`, `serena`, `uncle_fu`, `dylan`, `eric`, `ryan`, `aiden`, `ono_anna`, `sohee`) and OpenAI-style aliases (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`) to Qwen speakers. Unknown voice names return 400 with a list of valid voices.
+**Voice mapping**: `VOICE_MAP` maps voice names to reference audio WAV filenames in `voices/`. Both native Qwen speaker names (`vivian`, `serena`, `uncle_fu`, `dylan`, `eric`, `ryan`, `aiden`, `ono_anna`, `sohee`) and OpenAI-style aliases (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`) resolve to WAV files. Named voices use `generate_voice_clone()` with pre-computed voice prompts from these reference files. Unknown voice names return 400 with a list of valid voices.
 
-**Model loading**: Uses `flash_attention_2` if `flash-attn` is installed, falls back to `sdpa`. After loading, runs multi-length GPU warmup and pre-warms CUDA memory pool. `torch.compile(mode="reduce-overhead")` is applied unless `TORCH_COMPILE=false`.
+**Voice prompts**: `_voice_prompts` dict maps WAV filename → pre-computed `VoiceClonePromptItem` list. Populated during `_load_model_sync()` via `create_voice_clone_prompt(x_vector_only_mode=True)`. Cleared on model unload. All synthesis (named voices and streaming) goes through `generate_voice_clone()`.
+
+**instruct parameter**: Accepted for API backwards compatibility but silently ignored — the Base model does not support instruction-controlled synthesis. A warning is logged when `instruct` is set.
+
+**Model loading**: Uses `flash_attention_2` if `flash-attn` is installed, falls back to `sdpa`. After loading, pre-computes voice prompts from reference WAVs, runs multi-length GPU warmup via `generate_voice_clone()`, and pre-warms CUDA memory pool. `torch.compile(mode="reduce-overhead")` is applied unless `TORCH_COMPILE=false`.
 
 **Adaptive token budget**: `_adaptive_max_tokens()` scales `max_new_tokens` (128–2048) based on text length and CJK character ratio, avoiding fixed 2048 allocation for short inputs.
 
@@ -91,7 +95,7 @@ Note: Clone tests are skipped — the CustomVoice model does not support voice c
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | HuggingFace model ID |
+| `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | HuggingFace model ID |
 | `IDLE_TIMEOUT` | `120` | Seconds before idle GPU unload (0 = disabled) |
 | `REQUEST_TIMEOUT` | `300` | Max seconds per inference request |
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of first request |
@@ -110,7 +114,8 @@ Note: Clone tests are skipped — the CustomVoice model does not support voice c
 ## Important Details
 
 - Model weights download to `./models` (mounted as HuggingFace cache volume) on first run (~2.4 GB)
-- The `qwen-tts` pip package provides `Qwen3TTSModel` — this is the upstream model library
+- `voices/` directory contains 9 pre-generated reference WAV files (one per speaker), baked into the Docker image. These were bootstrapped from the CustomVoice model and serve as voice identity for named speakers via `generate_voice_clone()`
+- The `qwen-tts` pip package provides `Qwen3TTSModel` — this is the upstream model library. The Base model variant supports `generate_voice_clone()` and `create_voice_clone_prompt()` but not `generate_custom_voice()`
 - Audio format: WAV/FLAC/OGG use `soundfile`; MP3/Opus use `pydub`; WAV can use `torchaudio` if available
 - Speed adjustment: `pyrubberband` (pitch-preserving, preferred) or `scipy.signal.resample` (fallback)
 - Language detection: `fasttext-langdetect` if installed, else Unicode character range heuristic (`_detect_language_unicode`)

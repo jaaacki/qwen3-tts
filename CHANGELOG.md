@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.10.0 — 2026-02-24
+
+Switch from CustomVoice to Base model — enables voice cloning support.
+
+### Changed
+- **Model**: `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` → `Qwen/Qwen3-TTS-12Hz-0.6B-Base` — the Base model supports `generate_voice_clone()` and `create_voice_clone_prompt()`, enabling the `/v1/audio/speech/clone` endpoint
+- **Voice system**: Named voices now backed by pre-generated reference WAV files in `voices/` instead of `speaker=` parameter. All synthesis (named voices, streaming, batch) goes through `generate_voice_clone(voice_clone_prompt=...)` instead of `generate_custom_voice(speaker=...)`
+- **VOICE_MAP**: Values changed from speaker name strings to WAV filenames (e.g. `"vivian"` → `"vivian.wav"`)
+- **Model load**: `_load_model_sync()` now pre-computes voice clone prompts from reference WAVs via `create_voice_clone_prompt(x_vector_only_mode=True)` and stores them in `_voice_prompts` dict
+- **Warmup**: GPU warmup uses `generate_voice_clone()` instead of `generate_custom_voice()`
+- **`instruct` parameter**: Accepted for API backwards compatibility but silently ignored with a warning log — the Base model does not support instruction-controlled synthesis
+
+### Fixed
+- **`_do_voice_clone()` kwarg bug**: Changed `ref_prompt=ref_prompt` to `voice_clone_prompt=ref_prompt` — the old kwarg name was silently ignored, causing all clone requests to fail
+
+### Added
+- `voices/` directory with 9 pre-generated reference WAV files (one per Qwen speaker), bootstrapped from the CustomVoice model
+- `_voice_prompts` module-level dict — populated during model load, cleared on unload
+- `_VOICES_DIR` constant for reference audio directory path
+- Dockerfile `COPY voices/ /app/voices/` to bake reference audio into container image
+
+### Removed
+- `generate_custom_voice()` usage — all synthesis now uses `generate_voice_clone()`
+- `instruct` passthrough to model (Base model doesn't support it)
+- Clone test skips — all `@pytest.mark.skip(reason="CustomVoice model does not support voice cloning (#103)")` removed from E2E tests
+
+---
+
 ## v0.9.1 — 2026-02-24
 
 Comprehensive logging coverage — every significant code path now has structured log output.
