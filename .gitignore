@@ -12,6 +12,10 @@ __pycache__/
 *.flac
 *.ogg
 
+# E2E test generated files
+E2Etest/data/audio/
+E2Etest/reports/
+
 # Environment
 .env
 
