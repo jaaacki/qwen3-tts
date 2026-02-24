@@ -4,6 +4,17 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0019 — Quantization: when to trade precision for VRAM
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #86 — Add quantization support (INT8/FP8)
+
+The Qwen3-TTS-0.6B model consumes ~2.4 GB VRAM in bfloat16. On shared GPU environments where multiple services compete for a single card, that footprint matters. INT8 quantization via bitsandbytes (`QUANTIZE=int8`) cuts VRAM roughly in half to ~1.2 GB at the cost of 10-20% slower inference. FP8 via torchao (`QUANTIZE=fp8`) is more aggressive — ~0.8 GB — with minimal speed impact, but only works on Hopper (H100) and newer architectures. We keep bfloat16 as the default because maximum audio quality matters more than VRAM savings for most deployments.
+
+Both `bitsandbytes` and `torchao` are large packages that most users don't need. They're listed in `requirements.txt` as optional and installed with `|| true` in the Dockerfile so builds don't break on CPU-only hosts. The `_resolve_quant_kwargs()` helper validates `QUANTIZE` at model load time — not at request time — so a misconfigured env var fails fast with a clear error message instead of silently producing degraded output or crashing on the first inference call.
+
+---
+
 ## Entry 0016 — Priority inference queue: why a semaphore is not enough
 **Date**: 2026-02-24
 **Type**: What just happened

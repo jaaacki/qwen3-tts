@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased — Issue #86: quantization support] — 2026-02-24
+
+### Added
+- `QUANTIZE` env var — `int8` (bitsandbytes, ~50% VRAM reduction) or `fp8` (torchao, ~67% VRAM reduction) (#86)
+- `_resolve_quant_kwargs()` helper — returns `(dtype, load_kwargs)` for model loading (#86)
+- `bitsandbytes>=0.43.0` and `torchao>=0.5.0` added to `requirements.txt` (optional, install only when needed) (#86)
+
+### Changed
+- `_load_model_sync()` uses `_resolve_quant_kwargs()` instead of hardcoded `dtype=torch.bfloat16` (#86)
+
+---
+
 ## v0.7.0 — 2026-02-24
 
 Phase 4 Intelligence complete. Issues #81–#83 implemented.

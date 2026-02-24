@@ -214,6 +214,9 @@ TEXT_NORMALIZE = os.getenv("TEXT_NORMALIZE", "true").lower() in ("true", "1", "y
 MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "5"))
 _queue_depth = 0
 
+# Quantization mode — "", "int8" (bitsandbytes), or "fp8" (torchao)
+QUANTIZE = os.getenv("QUANTIZE", "").lower()
+
 # Track last request time
 _last_used = 0.0
 
@@ -293,6 +296,41 @@ def _release_gpu_full():
         torch.cuda.ipc_collect()
 
 
+def _resolve_quant_kwargs() -> tuple[torch.dtype, dict]:
+    """Return (dtype, extra_load_kwargs) based on QUANTIZE env var.
+
+    int8: bitsandbytes LLM.int8() — ~50% VRAM reduction, ~10-20% slower
+    fp8:  torchao FP8 dynamic activation — ~67% VRAM reduction, minimal speed impact on Hopper+
+    """
+    if not QUANTIZE:
+        return torch.bfloat16, {}
+
+    if QUANTIZE == "int8":
+        try:
+            import bitsandbytes  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "bitsandbytes is required for QUANTIZE=int8. "
+                "Install it: pip install bitsandbytes>=0.43.0"
+            )
+        return torch.float16, {"load_in_8bit": True}
+
+    if QUANTIZE == "fp8":
+        try:
+            from transformers import TorchAoConfig
+            quant_config = TorchAoConfig("fp8_dynamic_activation_fp8_weight")
+        except (ImportError, Exception) as exc:
+            raise ImportError(
+                "torchao is required for QUANTIZE=fp8. "
+                "Install it: pip install torchao>=0.5.0"
+            ) from exc
+        return torch.bfloat16, {"quantization_config": quant_config}
+
+    raise ValueError(
+        f"Unknown QUANTIZE value: {QUANTIZE!r}. Must be 'int8', 'fp8', or unset."
+    )
+
+
 def _load_model_sync():
     """Load model into GPU (blocking). Called from async context via lock."""
     global model, loaded_model_id, _last_used
@@ -312,14 +350,19 @@ def _load_model_sync():
         attn_impl = "sdpa"
         print("flash_attention_2 not available, falling back to sdpa")
 
-    print(f"Loading {model_id} (attn={attn_impl})...")
+    dtype, quant_kwargs = _resolve_quant_kwargs()
+    if QUANTIZE:
+        print(f"Loading model with quantization: {QUANTIZE}")
+
+    print(f"Loading {model_id} (attn={attn_impl}, dtype={dtype})...")
     model = Qwen3TTSModel.from_pretrained(
         model_id,
         device_map="cuda" if torch.cuda.is_available() else "cpu",
-        dtype=torch.bfloat16,
+        dtype=dtype,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
         attn_implementation=attn_impl,
+        **quant_kwargs,
     )
 
     # Compile model for faster inference (PyTorch 2.0+)

@@ -22,3 +22,7 @@ scipy==1.14.1
 
 # Model loading
 accelerate==1.1.1
+
+# Optional quantization (required only when QUANTIZE=int8 or QUANTIZE=fp8)
+bitsandbytes>=0.43.0
+torchao>=0.5.0

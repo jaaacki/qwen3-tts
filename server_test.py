@@ -1,4 +1,5 @@
 """Tests for server.py - Phase 1 Real-Time + Phase 2 Speed & Quality features."""
+import os
 import sys
 import io
 import hashlib
@@ -793,3 +794,51 @@ class TestPriorityInferQueue:
         assert server.PRIORITY_REALTIME == 0
         assert server.PRIORITY_BATCH == 1
         assert server.PRIORITY_REALTIME < server.PRIORITY_BATCH
+
+
+# --- Issue #86: Quantization support tests ---
+
+
+class TestQuantization:
+    """QUANTIZE env var controls model loading precision via _resolve_quant_kwargs()."""
+
+    def test_no_quantize_returns_bfloat16_no_extras(self):
+        """Empty QUANTIZE env var -> bfloat16, empty extra kwargs."""
+        with patch.object(server, "QUANTIZE", ""):
+            dtype, kwargs = server._resolve_quant_kwargs()
+        assert dtype == torch.bfloat16
+        assert kwargs == {}
+
+    def test_int8_returns_float16_and_load_in_8bit(self):
+        """QUANTIZE=int8 -> float16 dtype, load_in_8bit=True."""
+        mock_bnb = MagicMock()
+        with patch.dict("sys.modules", {"bitsandbytes": mock_bnb}), \
+             patch.object(server, "QUANTIZE", "int8"):
+            dtype, kwargs = server._resolve_quant_kwargs()
+        assert dtype == torch.float16
+        assert kwargs.get("load_in_8bit") is True
+
+    def test_int8_missing_bitsandbytes_raises_importerror(self):
+        """QUANTIZE=int8 without bitsandbytes installed raises ImportError."""
+        with patch.dict("sys.modules", {"bitsandbytes": None}), \
+             patch.object(server, "QUANTIZE", "int8"):
+            with pytest.raises(ImportError, match="bitsandbytes"):
+                server._resolve_quant_kwargs()
+
+    def test_fp8_returns_bfloat16_and_quantization_config(self):
+        """QUANTIZE=fp8 -> bfloat16 dtype, quantization_config in kwargs."""
+        mock_config_cls = MagicMock(name="TorchAoConfig")
+        mock_transformers = MagicMock()
+        mock_transformers.TorchAoConfig = mock_config_cls
+        with patch.dict("sys.modules", {"transformers": mock_transformers}), \
+             patch.object(server, "QUANTIZE", "fp8"):
+            dtype, kwargs = server._resolve_quant_kwargs()
+        assert dtype == torch.bfloat16
+        assert "quantization_config" in kwargs
+        mock_config_cls.assert_called_once_with("fp8_dynamic_activation_fp8_weight")
+
+    def test_unknown_quantize_value_raises_valueerror(self):
+        """Unknown QUANTIZE value raises ValueError with descriptive message."""
+        with patch.object(server, "QUANTIZE", "gguf"):
+            with pytest.raises(ValueError, match="Unknown QUANTIZE"):
+                server._resolve_quant_kwargs()
