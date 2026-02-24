@@ -251,9 +251,6 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 # Idle unload timeout in seconds (0 = disabled)
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "120"))
 
-# VAD silence trimming (strip leading/trailing silence from audio)
-VAD_TRIM = os.getenv("VAD_TRIM", "true").lower() in ("true", "1", "yes")
-
 # Text normalization (expand numbers, currency, abbreviations)
 TEXT_NORMALIZE = os.getenv("TEXT_NORMALIZE", "true").lower() in ("true", "1", "yes")
 
@@ -325,6 +322,9 @@ VOICE_MAP = {
 }
 
 DEFAULT_VOICE = "vivian"
+
+# Set of known model speakers (used for validation)
+KNOWN_SPEAKERS = set(VOICE_MAP.values())
 
 
 class TTSRequest(BaseModel):
@@ -618,7 +618,7 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
                 buffer, format="opus", codec="libopus",
                 parameters=["-b:a", "32k"]
             )
-            content_type = "audio/opus"
+            content_type = "audio/ogg"
         else:
             sf.write(buffer, audio_data, sample_rate, format="WAV")
             content_type = "audio/wav"
@@ -631,11 +631,21 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
 
 
 def resolve_voice(voice: Optional[str]) -> str:
-    """Resolve a voice name to a Qwen3-TTS speaker name."""
+    """Resolve a voice name to a Qwen3-TTS speaker name.
+
+    Raises HTTPException 400 if the resolved voice is not a known model speaker.
+    """
     if not voice:
         return DEFAULT_VOICE
     voice_lower = voice.lower().replace(" ", "_")
-    return VOICE_MAP.get(voice_lower, voice_lower)
+    resolved = VOICE_MAP.get(voice_lower, voice_lower)
+    if resolved not in KNOWN_SPEAKERS:
+        valid = sorted(VOICE_MAP.keys())
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown voice '{voice}'. Valid voices: {', '.join(valid)}",
+        )
+    return resolved
 
 
 _langdetect_model = None
@@ -702,23 +712,6 @@ def _build_gen_kwargs(text: str, request: TTSRequest) -> dict:
     if request.top_p is not None:
         kwargs["top_p"] = request.top_p
     return kwargs
-
-
-def _trim_silence(audio: np.ndarray, sample_rate: int = 24000, threshold_db: float = -40.0) -> np.ndarray:
-    """Trim leading and trailing silence from audio array."""
-    if not VAD_TRIM:
-        return audio
-    threshold = 10 ** (threshold_db / 20.0)
-    non_silent = np.abs(audio) > threshold
-    if not np.any(non_silent):
-        return audio  # all silence, return as-is
-    start = np.argmax(non_silent)
-    end = len(non_silent) - np.argmax(non_silent[::-1])
-    # Add small padding (50ms) to avoid cutting speech
-    pad = int(0.05 * sample_rate)
-    start = max(0, start - pad)
-    end = min(len(audio), end + pad)
-    return audio[start:end]
 
 
 def _expand_currency(amount: str, unit: str) -> str:
@@ -931,8 +924,6 @@ async def synthesize_speech(request: TTSRequest):
         if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
 
-        audio_data = _trim_silence(audio_data, sr)
-
         audio_data = _adjust_speed(audio_data, sr, request.speed)
 
         audio_bytes, content_type = await _encode_audio_async(
@@ -1109,8 +1100,6 @@ async def clone_voice(
         audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
         if audio_data.ndim > 1:
             audio_data = audio_data.squeeze()
-
-        audio_data = _trim_silence(audio_data, sr)
 
         audio_bytes_out, content_type = await _encode_audio_async(
             audio_data, sr, response_format
