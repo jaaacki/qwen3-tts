@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased — Issue #82: voice clone prompt cache] — 2026-02-24
+
+### Changed
+- Voice clone cache now stores pre-computed speaker embeddings via `model.create_voice_clone_prompt()` instead of raw decoded audio arrays (#82)
+- `_voice_cache` renamed to `_voice_prompt_cache`; `_get_cached_ref_audio()` replaced by `_get_cached_voice_prompt()`
+- `_do_voice_clone()` accepts a pre-computed prompt object instead of raw `(audio, sr)` tuple
+- `POST /cache/clear` now also clears the voice prompt cache, returning `{"audio_cleared": N, "voice_cleared": M}`
+
 ## v0.6.0 — 2026-02-20
 
 Phase 3 Production Grade complete. All 36 roadmap issues implemented.

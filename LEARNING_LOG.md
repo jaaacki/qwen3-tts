@@ -4,6 +4,23 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0023 — Voice clone prompt cache: caching at the right layer
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Issue #82 — Fix voice clone caching — use `create_voice_clone_prompt()`
+
+The original `_voice_cache` (#15) stored `(np.ndarray, int)` — the decoded reference audio array and sample rate. This saved the cost of reading and decoding the uploaded WAV file (~1ms), but missed the actual bottleneck: computing the speaker embedding inside `model.generate_voice_clone()`. Every clone request, even with identical reference audio, ran the full encoder pass to extract the voice embedding. This pass dominates the preprocessing cost (50-200ms depending on audio length).
+
+The fix is to cache at the embedding layer, not the audio layer. `model.create_voice_clone_prompt()` takes the decoded audio and reference text, runs the encoder once, and returns a reusable prompt object containing the speaker embedding. Subsequent `generate_voice_clone()` calls accept this prompt via `ref_prompt=` and skip the encoder entirely.
+
+The cache structure is unchanged — `OrderedDict` with SHA-256 content hash keys, LRU eviction, configurable via `VOICE_CACHE_MAX`. What changed is *what* gets cached: opaque prompt objects instead of numpy arrays. The trade-off is that prompt objects may hold GPU tensors (consuming VRAM proportional to cache size), but at 32 entries default this is negligible compared to the 2.4 GB model weights.
+
+The `/cache/clear` endpoint was also updated to clear both audio and voice prompt caches, returning separate counts for each. This is a minor API change (the response shape changed from `{"cleared": N}` to `{"audio_cleared": N, "voice_cleared": M}`).
+
+Key observation: caching at the wrong layer is worse than no caching at all — it gives operators false confidence that "caching is working" while the expensive operation still runs on every request.
+
+---
+
 ## Entry 0012 — GPU memory pool pre-warming and CUDA allocator tuning
 **Date**: 2026-02-20
 **Type**: Why this design
