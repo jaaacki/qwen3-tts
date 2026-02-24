@@ -20,7 +20,7 @@ with patch.dict("sys.modules", _mock_modules):
         _adjust_speed, resolve_voice, _LANG_MAP,
         _get_cached_ref_audio, _split_sentences, _adaptive_max_tokens,
         _audio_cache_key, _get_audio_cache, _set_audio_cache,
-        _audio_cache, _AUDIO_CACHE_MAX,
+        _audio_cache, _AUDIO_CACHE_MAX, _build_gen_kwargs,
     )
     import server
 
@@ -654,3 +654,53 @@ class TestAudioCacheGetSet:
             _set_audio_cache("key1", b"data", "audio/wav")
             assert len(_audio_cache) == 0
             assert _get_audio_cache("key1") is None
+
+
+# --- Issue #83: Generation parameter exposure tests ---
+
+
+class TestGenerationParams:
+    """temperature and top_p are passed through to model.generate() when set."""
+
+    def test_temperature_included_in_build_gen_kwargs(self):
+        """temperature in request -> present in gen_kwargs via _build_gen_kwargs."""
+        req = server.TTSRequest(input="hello", temperature=0.8)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["temperature"] == 0.8
+        assert "top_p" not in gen_kwargs
+
+    def test_top_p_included_in_build_gen_kwargs(self):
+        """top_p in request -> present in gen_kwargs via _build_gen_kwargs."""
+        req = server.TTSRequest(input="hello", top_p=0.95)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["top_p"] == 0.95
+        assert "temperature" not in gen_kwargs
+
+    def test_both_params_included(self):
+        """Both temperature and top_p set -> both in gen_kwargs."""
+        req = server.TTSRequest(input="hello", temperature=1.2, top_p=0.9)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["temperature"] == 1.2
+        assert gen_kwargs["top_p"] == 0.9
+
+    def test_neither_param_means_neither_in_kwargs(self):
+        """Omitting both leaves gen_kwargs with only max_new_tokens."""
+        req = server.TTSRequest(input="hello")
+        assert req.temperature is None
+        assert req.top_p is None
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert "temperature" not in gen_kwargs
+        assert "top_p" not in gen_kwargs
+        assert "max_new_tokens" in gen_kwargs
+
+    def test_max_new_tokens_always_present(self):
+        """_build_gen_kwargs always includes max_new_tokens from _adaptive_max_tokens."""
+        req = server.TTSRequest(input="hello", temperature=0.5)
+        gen_kwargs = server._build_gen_kwargs("hello", req)
+        assert gen_kwargs["max_new_tokens"] == _adaptive_max_tokens("hello")
+
+    def test_ttsrequest_accepts_temperature_and_top_p(self):
+        """TTSRequest model accepts temperature and top_p fields."""
+        req = server.TTSRequest(input="test", temperature=1.2, top_p=0.9)
+        assert req.temperature == 1.2
+        assert req.top_p == 0.9

@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased — Issue #83: expose temperature and top_p] — 2026-02-24
+
+### Added
+- Optional `temperature` and `top_p` fields on `TTSRequest` — passed through to `model.generate()` kwargs for controlling generation diversity
+- `temperature` and `top_p` Form parameters on `/v1/audio/speech/clone` endpoint
+- `temperature` and `top_p` JSON fields accepted on WebSocket `/v1/audio/speech/ws` endpoint
+- `_build_gen_kwargs()` helper to DRY up gen_kwargs construction across all synthesis endpoints
+
+### Changed
+- Replaced 4x repeated inline `gen_kwargs` dict construction with `_build_gen_kwargs()` calls in `/v1/audio/speech`, `/v1/audio/speech/stream`, `/v1/audio/speech/stream/pcm`
+- Fixed variable ordering bug in `/v1/audio/speech/clone` where `_adaptive_max_tokens(text)` was called before `text` was assigned
+
+---
+
 ## v0.6.0 — 2026-02-20
 
 Phase 3 Production Grade complete. All 36 roadmap issues implemented.
