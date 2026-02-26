@@ -1,25 +1,25 @@
 # Pinned versions — update with care, test after any bump
-# Base image (pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime) provides:
-#   torch==2.5.1, torchaudio==2.5.1, numpy, etc.
+# Base image (pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime) provides:
+#   torch==2.6.0, torchaudio==2.6.0, numpy, Python 3.11
 
 # Model library
-qwen-tts>=0.1.0
+qwen-tts==0.1.1
 
 # Web framework
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-uvloop==0.21.0
-httptools==0.6.4
-python-multipart==0.0.12
-orjson==3.10.12
-websockets==13.1
-h2==4.1.0
+fastapi==0.133.1
+uvicorn[standard]==0.41.0
+uvloop==0.22.1
+httptools==0.7.1
+python-multipart==0.0.22
+orjson==3.11.7
+websockets==16.0
+h2==4.3.0
 aiohttp>=3.9.0
 
 # Audio processing
-soundfile==0.12.1
+soundfile==0.13.1
 pydub==0.25.1
-scipy==1.14.1
+scipy==1.17.1
 
 # Model loading
 accelerate==1.12.0

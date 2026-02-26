@@ -1,5 +1,5 @@
 # Stage 1: builder — install Python deps with build tools
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime AS builder
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS builder
 
 WORKDIR /build
 
@@ -10,13 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Optional quantization — bitsandbytes only; torchao skipped because
-# torchao 0.5.x (torch 2.5) lacks APIs that transformers 4.57+ expects,
-# and newer torchao requires torch 2.6+
+# Optional quantization
 RUN pip install --no-cache-dir --prefix=/install "bitsandbytes>=0.43.0" || true
 
 # Stage 2: runtime — lean image with only what's needed
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 

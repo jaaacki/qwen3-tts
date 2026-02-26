@@ -10,13 +10,13 @@ services:
       - MODEL_ID=Qwen/Qwen3-TTS-12Hz-0.6B-Base
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - REQUEST_TIMEOUT=300
-      - IDLE_TIMEOUT=120        # 0 = never unload (always-on mode)
+      - IDLE_TIMEOUT=0          # 0 = never unload (always-on mode)
       - AUDIO_CACHE_MAX=256
       - TORCH_COMPILE=true
       - VAD_TRIM=true
       - TEXT_NORMALIZE=true
       - VOICE_CACHE_MAX=32
-      - PRELOAD_MODEL=false     # true = load model at startup instead of first request
+      - PRELOAD_MODEL=true      # true = load model at startup instead of first request
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
       - MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
       - INFERENCE_CPU_CORES=
