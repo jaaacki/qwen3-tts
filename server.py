@@ -119,6 +119,11 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True   # 3x faster matmul on Ampere+ GPUs
     torch.backends.cudnn.allow_tf32 = True           # enable TF32 for cuDNN ops
+    _gpu_name = torch.cuda.get_device_name(0)
+    _gpu_total_mb = round(torch.cuda.get_device_properties(0).total_memory / 1024**2)
+    logger.bind(gpu=_gpu_name, vram_total_mb=_gpu_total_mb).info("CUDA device detected")
+else:
+    logger.warning("CUDA not available — running on CPU, performance will be poor")
 
 # Eager model preload on startup (default: false)
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "false").lower() in ("true", "1")
@@ -285,8 +290,9 @@ QUANTIZE = os.getenv("QUANTIZE", "").lower()
 # Batch inference — max jobs per GPU dispatch (1 = disabled)
 MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "4"))
 
-# Track last request time
-_last_used = 0.0
+# Track last request time (initialised to now so the idle watchdog never
+# computes a bogus idle_secs during the window before the first request)
+_last_used = time.time()
 
 # Audio output LRU cache — skips GPU entirely on cache hit
 _AUDIO_CACHE_MAX = int(os.getenv("AUDIO_CACHE_MAX", "256"))
@@ -432,6 +438,7 @@ def _load_model_sync():
     if model is not None:
         return
 
+    t_load_start = time.time()
     model_id = os.getenv("MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
     loaded_model_id = model_id
 
@@ -471,9 +478,10 @@ def _load_model_sync():
     for voice_file in sorted(set(VOICE_MAP.values())):
         path = os.path.join(_VOICES_DIR, voice_file)
         if os.path.exists(path):
+            t_v = time.perf_counter()
             prompts = model.create_voice_clone_prompt(ref_audio=path, x_vector_only_mode=True)
             _voice_prompts[voice_file] = prompts
-            logger.bind(voice=voice_file).debug("Voice prompt computed")
+            logger.bind(voice=voice_file, ms=round((time.perf_counter() - t_v) * 1000)).debug("Voice prompt computed")
         else:
             logger.bind(voice=voice_file, path=path).warning("Reference audio not found, skipping")
     logger.bind(voices=len(_voice_prompts)).info("Voice prompts ready")
@@ -487,6 +495,7 @@ def _load_model_sync():
             "Hello, how are you doing today?",              # ~20 tokens — medium
             "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.",  # ~50 tokens — longer
         ]
+        t_warmup = time.perf_counter()
         for text in warmup_texts:
             try:
                 with torch.inference_mode():
@@ -499,6 +508,7 @@ def _load_model_sync():
                 logger.bind(chars=len(text)).debug("Warmup synthesis complete")
             except Exception as e:
                 logger.bind(text_preview=text[:20]).warning("Warmup synthesis failed: {}", e)
+        logger.bind(warmup_ms=round((time.perf_counter() - t_warmup) * 1000)).info("GPU warmup complete")
         # Clear warmup allocations so steady-state VRAM is clean
         _release_gpu_full()
 
@@ -515,7 +525,7 @@ def _load_model_sync():
     _last_used = time.time()
     if _prometheus_available:
         tts_model_loaded.set(1)
-    logger.bind(model_id=model_id).success("Model loaded")
+    logger.bind(model_id=model_id, load_ms=round((time.time() - t_load_start) * 1000)).success("Model loaded")
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
         reserved = torch.cuda.memory_reserved() / 1024**2
@@ -752,8 +762,10 @@ def detect_language(text: str) -> str:
             result = detector(text, low_memory=False)
             lang = result.get("lang", "en")
             return _LANG_MAP.get(lang, "English")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.bind(text_preview=text[:40]).debug(
+                "fasttext language detection failed, using Unicode heuristic: {}", e
+            )
     return _detect_language_unicode(text)
 
 
@@ -878,16 +890,28 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
         return _voice_prompt_cache[cache_key]
 
     # Decode audio to pass to create_voice_clone_prompt
-    ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
+    try:
+        ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot read reference audio: {e}")
+
     if len(ref_audio_data.shape) > 1:
         ref_audio_data = ref_audio_data.mean(axis=1)
 
     # x_vector_only_mode=True extracts speaker embedding without needing ref_text;
     # when ref_text is provided, use ICL mode (x_vector_only_mode=False) for better quality
-    prompt = model.create_voice_clone_prompt(
-        ref_audio=(ref_audio_data, ref_sr),
-        ref_text=ref_text,
-        x_vector_only_mode=(ref_text is None),
+    t_encode = time.perf_counter()
+    try:
+        prompt = model.create_voice_clone_prompt(
+            ref_audio=(ref_audio_data, ref_sr),
+            ref_text=ref_text,
+            x_vector_only_mode=(ref_text is None),
+        )
+    except Exception as e:
+        logger.opt(exception=True).error("create_voice_clone_prompt failed")
+        raise HTTPException(status_code=500, detail=f"Voice prompt creation failed: {e}")
+    logger.bind(cache_key=cache_key[:12], encode_ms=round((time.perf_counter() - t_encode) * 1000)).debug(
+        "Voice prompt encoded"
     )
 
     if VOICE_CACHE_MAX > 0:
@@ -981,8 +1005,7 @@ async def synthesize_speech(request: TTSRequest):
         text = _normalize_text(text)
         gen_kwargs = _build_gen_kwargs(text, request)
 
-        t_queue = time.perf_counter()
-        t_queue_done = time.perf_counter()
+        t_infer_start = time.perf_counter()
         wavs, sr = await asyncio.wait_for(
             _infer_queue.submit_batch(
                 text=text, language=language, speaker=voice_file, gen_kwargs=gen_kwargs,
@@ -1009,8 +1032,7 @@ async def synthesize_speech(request: TTSRequest):
             language=language,
             chars=len(text),
             format=request.response_format,
-            queue_ms=round((t_queue_done - t_queue) * 1000),
-            infer_ms=round((t_infer_done - t_queue_done) * 1000),
+            infer_ms=round((t_infer_done - t_infer_start) * 1000),
             encode_ms=round((t_encode_done - t_infer_done) * 1000),
             total_ms=round((t_encode_done - t_start) * 1000),
         ).info("synthesis_complete")
@@ -1019,7 +1041,7 @@ async def synthesize_speech(request: TTSRequest):
 
         if _prometheus_available:
             tts_requests_total.labels(voice=voice_file, format=request.response_format).inc()
-            tts_inference_duration.observe(t_infer_done - t_queue_done)
+            tts_inference_duration.observe(t_infer_done - t_infer_start)
 
         return Response(
             content=audio_bytes,
@@ -1066,6 +1088,7 @@ async def synthesize_speech_stream(request: TTSRequest):
         chunks_sent = 0
         for sentence in sentences:
             try:
+                t_sent = time.perf_counter()
                 gen_kwargs = _build_gen_kwargs(sentence, request)
                 wavs, sr = await asyncio.wait_for(
                     _infer_queue.submit(
@@ -1089,6 +1112,11 @@ async def synthesize_speech_stream(request: TTSRequest):
                 audio_int16 = (audio_data * 32767).astype(np.int16)
                 pcm_bytes = audio_int16.tobytes()
                 yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
+                logger.bind(
+                    sentence_idx=chunks_sent,
+                    chars=len(sentence),
+                    ms=round((time.perf_counter() - t_sent) * 1000),
+                ).debug("sentence_synthesized")
                 chunks_sent += 1
 
                 _last_used = time.time()
@@ -1167,7 +1195,6 @@ async def clone_voice(
             audio_bytes, ref_text.strip() if ref_text else None
         )
 
-        t_queue = time.perf_counter()
         t_infer_start = time.perf_counter()
         wavs, sr = await asyncio.wait_for(
             _infer_queue.submit(
@@ -1194,7 +1221,6 @@ async def clone_voice(
 
         logger.bind(
             endpoint="/v1/audio/speech/clone",
-            queue_ms=round((t_infer_start - t_queue) * 1000, 1),
             inference_ms=round((t_infer_end - t_infer_start) * 1000, 1),
             encode_ms=round((t_end - t_infer_end) * 1000, 1),
             total_ms=round((t_end - t_start) * 1000, 1),
