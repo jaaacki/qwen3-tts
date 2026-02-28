@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.10.1 — 2026-03-01
+
+Standardize structured logging output (#107).
+
+### Changed
+- **`_json_sink`**: timestamp now ISO 8601 with timezone and fractional seconds via `record["time"].isoformat()` (was `strftime("%Y-%m-%dT%H:%M:%S")`)
+- **`_json_sink`**: level names remapped to lowercase ops convention — `CRITICAL`→`fatal`, `WARNING`→`warn`, `SUCCESS`→`info`, others lowercased
+- **`_json_sink`**: output to `sys.stdout` instead of `sys.stderr`
+
+### Added
+- `"service": "qwen3-tts"` field in every JSON log entry
+- `_LEVEL_REMAP` dict for level name normalization
+- `request_id` to `/v1/audio/speech/stream`, `/v1/audio/speech/stream/pcm`, `/v1/audio/speech/clone` endpoints — all logger calls within these endpoints now include `request_id`
+- `request_id` alias for `ws_id` in WebSocket `/v1/audio/speech/ws` endpoint — both fields emitted for backwards compatibility
+
+---
+
 ## v0.10.0 — 2026-02-24
 
 Switch from CustomVoice to Base model — enables voice cloning support.
