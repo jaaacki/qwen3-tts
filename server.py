@@ -484,7 +484,12 @@ def _load_model_sync():
         try:
             from torchao.quantization import quantize_, Float8WeightOnlyConfig
             quantize_(model.model, Float8WeightOnlyConfig())
-            logger.success("FP8 weight quantization applied via torchao")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            alloc_mb = torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0
+            logger.bind(gpu_allocated_mb=round(alloc_mb)).success(
+                "FP8 weight quantization applied via torchao"
+            )
         except Exception as e:
             logger.warning("FP8 quantization failed, continuing without: {}", e)
 

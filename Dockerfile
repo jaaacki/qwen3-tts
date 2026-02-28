@@ -38,6 +38,7 @@ RUN FLASH_ATTENTION_FORCE_BUILD=TRUE \
 
 # Optional quantization
 RUN pip install --no-cache-dir "bitsandbytes>=0.43.0" || true
+# torchao for FP8 quantization (transformers 4.57+ expects this version's API)
 RUN pip install --no-cache-dir torchao || true
 
 # Copy application
