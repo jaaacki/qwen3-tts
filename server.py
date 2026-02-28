@@ -563,13 +563,15 @@ def _load_model_sync():
 
 def _unload_model_sync():
     """Unload model from GPU to free VRAM."""
-    global model
+    global model, _inference_stream, _transfer_stream
 
     if model is None:
         return
 
     logger.info("Unloading model (idle timeout)")
     _voice_prompts.clear()
+    _inference_stream = None
+    _transfer_stream = None
     del model
     model = None
     if _prometheus_available:
@@ -910,14 +912,26 @@ def _do_synthesize_batch(texts: list[str], languages: list[str], voice_files: li
     extra = {k: v for k, v in gen_kwargs_list[0].items() if k != "max_new_tokens"}
     # Flatten: each _voice_prompts[vf] is [VoiceClonePromptItem]; API expects a flat list
     prompts = [_voice_prompts[vf][0] for vf in voice_files]
+    stream = _inference_stream
     with torch.inference_mode():
-        wavs, sr = model.generate_voice_clone(
-            text=texts,
-            language=languages,
-            voice_clone_prompt=prompts,
-            max_new_tokens=max_tokens,
-            **extra,
-        )
+        if stream is not None:
+            with torch.cuda.stream(stream):
+                wavs, sr = model.generate_voice_clone(
+                    text=texts,
+                    language=languages,
+                    voice_clone_prompt=prompts,
+                    max_new_tokens=max_tokens,
+                    **extra,
+                )
+            stream.synchronize()
+        else:
+            wavs, sr = model.generate_voice_clone(
+                text=texts,
+                language=languages,
+                voice_clone_prompt=prompts,
+                max_new_tokens=max_tokens,
+                **extra,
+            )
     return wavs, sr
 
 
@@ -980,13 +994,24 @@ def _do_voice_clone(text, language, ref_prompt, gen_kwargs):
 
     No per-request GC — let CUDA reuse cached allocations.
     """
+    stream = _inference_stream
     with torch.inference_mode():
-        wavs, sr = model.generate_voice_clone(
-            text=text,
-            language=language,
-            voice_clone_prompt=ref_prompt,
-            **gen_kwargs,
-        )
+        if stream is not None:
+            with torch.cuda.stream(stream):
+                wavs, sr = model.generate_voice_clone(
+                    text=text,
+                    language=language,
+                    voice_clone_prompt=ref_prompt,
+                    **gen_kwargs,
+                )
+            stream.synchronize()
+        else:
+            wavs, sr = model.generate_voice_clone(
+                text=text,
+                language=language,
+                voice_clone_prompt=ref_prompt,
+                **gen_kwargs,
+            )
     return wavs, sr
 
 
@@ -1162,6 +1187,9 @@ async def synthesize_speech_stream(request: TTSRequest):
                     new_length = int(len(audio_data) / request.speed)
                     if new_length > 0:
                         audio_data = scipy_signal.resample(audio_data, new_length)
+
+                if request.sample_rate:
+                    audio_data = _resample_audio(audio_data, sr, request.sample_rate)
 
                 audio_int16 = (audio_data * 32767).astype(np.int16)
                 pcm_bytes = audio_int16.tobytes()
@@ -1350,6 +1378,8 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                     new_length = int(len(audio_data) / request.speed)
                     if new_length > 0:
                         audio_data = scipy_signal.resample(audio_data, new_length)
+                if request.sample_rate:
+                    audio_data = _resample_audio(audio_data, sr, request.sample_rate)
                 pcm_data = np.clip(audio_data, -1.0, 1.0)
                 pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
                 yield pcm_bytes
@@ -1367,11 +1397,12 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                      chars=len(text), total_ms=round((time.perf_counter() - t_pcm_start) * 1000),
                      ).info("pcm_stream_complete")
 
+    pcm_sr = request.sample_rate or 24000
     return StreamingResponse(
         pcm_generator(),
         media_type="application/octet-stream",
         headers={
-            "X-PCM-Sample-Rate": "24000",
+            "X-PCM-Sample-Rate": str(pcm_sr),
             "X-PCM-Bit-Depth": "16",
             "X-PCM-Channels": "1",
             "Content-Disposition": 'attachment; filename="speech.pcm"',
@@ -1399,6 +1430,7 @@ async def ws_synthesize(websocket: WebSocket):
             voice_file = resolve_voice(data.get("voice"))
             language = data.get("language") or detect_language(text)
             speed = float(data.get("speed", 1.0))
+            ws_sample_rate = data.get("sample_rate")
             ws_temperature = data.get("temperature")
             ws_top_p = data.get("top_p")
 
@@ -1430,6 +1462,9 @@ async def ws_synthesize(websocket: WebSocket):
                     new_length = int(len(audio_data) / speed)
                     if new_length > 0:
                         audio_data = scipy_signal.resample(audio_data, new_length)
+
+                if ws_sample_rate:
+                    audio_data = _resample_audio(audio_data, sr, int(ws_sample_rate))
 
                 pcm = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
                 await websocket.send_bytes(pcm)
