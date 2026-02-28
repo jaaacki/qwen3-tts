@@ -59,17 +59,29 @@ LOG_FORMAT = os.getenv("LOG_FORMAT", "json")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
+_LEVEL_REMAP = {
+    "CRITICAL": "fatal",
+    "ERROR": "error",
+    "WARNING": "warn",
+    "INFO": "info",
+    "DEBUG": "debug",
+    "TRACE": "trace",
+    "SUCCESS": "info",
+}
+
+
 def _json_sink(message):
     """Flat JSON sink matching previous JsonFormatter schema."""
     record = message.record
     log_obj = {
-        "timestamp": record["time"].strftime("%Y-%m-%dT%H:%M:%S"),
-        "level": record["level"].name,
+        "timestamp": record["time"].isoformat(),
+        "level": _LEVEL_REMAP.get(record["level"].name, record["level"].name.lower()),
         "message": record["message"],
         "logger": record["name"] or "qwen3-tts",
+        "service": "qwen3-tts",
     }
     log_obj.update(record["extra"])
-    print(json.dumps(log_obj, default=str), file=sys.stderr, flush=True)
+    print(json.dumps(log_obj, default=str), file=sys.stdout, flush=True)
 
 
 class _InterceptHandler(logging.Handler):
@@ -1170,10 +1182,11 @@ async def synthesize_speech(request: TTSRequest):
 async def synthesize_speech_stream(request: TTSRequest):
     """Sentence-chunked SSE streaming TTS endpoint."""
     global _last_used
+    request_id = str(uuid.uuid4())[:8]
     await _ensure_model_loaded()
 
     if not request.input or not request.input.strip():
-        logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: empty input")
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     voice_file = resolve_voice(request.voice)
@@ -1182,7 +1195,7 @@ async def synthesize_speech_stream(request: TTSRequest):
     sentences = _split_sentences(text)
 
     if not sentences:
-        logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: no sentences")
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream").warning("Request rejected: no sentences")
         raise HTTPException(status_code=400, detail="No sentences found in input")
 
     async def generate():
@@ -1243,6 +1256,7 @@ async def synthesize_speech_stream(request: TTSRequest):
                 pcm_bytes = audio_int16.tobytes()
                 yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
                 logger.bind(
+                    request_id=request_id,
                     sentence_idx=chunks_sent,
                     chars=len(sentences[sentence_idx]),
                     ms=round((time.perf_counter() - t_sent) * 1000),
@@ -1253,18 +1267,18 @@ async def synthesize_speech_stream(request: TTSRequest):
                 _last_used = time.time()
 
             except asyncio.TimeoutError:
-                logger.bind(endpoint="/v1/audio/speech/stream", voice=voice_file,
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream", voice=voice_file,
                              chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("Stream synthesis timed out")
                 yield "data: [ERROR] Synthesis timed out\n\n"
                 return
             except Exception as e:
-                logger.bind(endpoint="/v1/audio/speech/stream", voice=voice_file,
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream", voice=voice_file,
                              chunks_sent=chunks_sent).opt(exception=True).error("Stream synthesis failed")
                 yield f"data: [ERROR] {str(e)}\n\n"
                 return
 
         yield "data: [DONE]\n\n"
-        logger.bind(endpoint="/v1/audio/speech/stream", voice=voice_file,
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream", voice=voice_file,
                      language=language, sentences=len(sentences), chunks_sent=chunks_sent,
                      chars=len(text), total_ms=round((time.perf_counter() - t_stream_start) * 1000),
                      ).info("stream_complete")
@@ -1292,10 +1306,11 @@ async def clone_voice(
     """Voice cloning endpoint - requires a reference audio file."""
     global _queue_depth
 
+    request_id = str(uuid.uuid4())[:8]
     t_start = time.perf_counter()
 
     if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
-        logger.bind(endpoint="/v1/audio/speech/clone",
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/clone",
                      queue_depth=_queue_depth).warning("Request rejected: queue full")
         raise HTTPException(
             status_code=503,
@@ -1306,7 +1321,7 @@ async def clone_voice(
     await _ensure_model_loaded()
 
     if not input or not input.strip():
-        logger.bind(endpoint="/v1/audio/speech/clone").warning("Request rejected: empty input")
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/clone").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     _queue_depth += 1
@@ -1351,6 +1366,7 @@ async def clone_voice(
         t_end = time.perf_counter()
 
         logger.bind(
+            request_id=request_id,
             endpoint="/v1/audio/speech/clone",
             inference_ms=round((t_infer_end - t_infer_start) * 1000, 1),
             encode_ms=round((t_end - t_infer_end) * 1000, 1),
@@ -1369,13 +1385,13 @@ async def clone_voice(
         )
 
     except asyncio.TimeoutError:
-        logger.bind(endpoint="/v1/audio/speech/clone",
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/clone",
                      timeout_s=REQUEST_TIMEOUT).error("Voice clone timed out")
         raise HTTPException(status_code=504, detail="Voice clone timed out")
     except HTTPException:
         raise
     except Exception as e:
-        logger.bind(endpoint="/v1/audio/speech/clone").opt(exception=True).error("Voice clone failed")
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/clone").opt(exception=True).error("Voice clone failed")
         raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
     finally:
         _queue_depth -= 1
@@ -1389,10 +1405,11 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     Headers report the audio format: 24000 Hz, 16-bit, mono.
     """
     global _last_used
+    request_id = str(uuid.uuid4())[:8]
     await _ensure_model_loaded()
 
     if not request.input or not request.input.strip():
-        logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: empty input")
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: empty input")
         raise HTTPException(status_code=400, detail="Input text is required")
 
     voice_file = resolve_voice(request.voice)
@@ -1400,7 +1417,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     text = request.input.strip()
     sentences = _split_sentences(text)
     if not sentences:
-        logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: no sentences")
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: no sentences")
         raise HTTPException(status_code=400, detail="No sentences found in input")
 
     async def pcm_generator():
@@ -1462,15 +1479,15 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                 sentence_idx += 1
 
             except asyncio.TimeoutError:
-                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                              chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("PCM stream timed out")
                 break
             except Exception:
-                logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                              chunks_sent=chunks_sent).opt(exception=True).error("PCM stream failed")
                 break
 
-        logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
+        logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                      language=language, sentences=len(sentences), chunks_sent=chunks_sent,
                      chars=len(text), total_ms=round((time.perf_counter() - t_pcm_start) * 1000),
                      ).info("pcm_stream_complete")
@@ -1492,8 +1509,9 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
 async def ws_synthesize(websocket: WebSocket):
     """WebSocket streaming endpoint. Send JSON, receive binary PCM per sentence."""
     ws_id = str(uuid.uuid4())[:8]
+    request_id = ws_id
     await websocket.accept()
-    logger.bind(ws_id=ws_id, endpoint="/v1/audio/speech/ws").debug("WebSocket connected")
+    logger.bind(request_id=request_id, ws_id=ws_id, endpoint="/v1/audio/speech/ws").debug("WebSocket connected")
     messages_handled = 0
     t_ws_start = time.perf_counter()
     try:
@@ -1501,7 +1519,7 @@ async def ws_synthesize(websocket: WebSocket):
             data = await websocket.receive_json()
             text = (data.get("input") or "").strip()
             if not text:
-                logger.bind(ws_id=ws_id).debug("WebSocket empty input, skipping")
+                logger.bind(request_id=request_id, ws_id=ws_id).debug("WebSocket empty input, skipping")
                 await websocket.send_json({"event": "error", "detail": "input is required"})
                 continue
 
@@ -1583,10 +1601,10 @@ async def ws_synthesize(websocket: WebSocket):
             await websocket.send_json({"event": "done"})
             messages_handled += 1
     except WebSocketDisconnect:
-        logger.bind(ws_id=ws_id, messages=messages_handled,
+        logger.bind(request_id=request_id, ws_id=ws_id, messages=messages_handled,
                      duration_ms=round((time.perf_counter() - t_ws_start) * 1000)).info("WebSocket disconnected")
     except Exception as e:
-        logger.bind(ws_id=ws_id, messages=messages_handled).opt(exception=True).error("WebSocket error")
+        logger.bind(request_id=request_id, ws_id=ws_id, messages=messages_handled).opt(exception=True).error("WebSocket error")
         try:
             await websocket.send_json({"event": "error", "detail": str(e)})
         except Exception:
