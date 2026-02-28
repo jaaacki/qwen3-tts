@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import torch
@@ -151,7 +151,51 @@ async def lifespan(app):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(_infer_executor, _unload_model_sync)
 
+class ErrorResponse(BaseModel):
+    """Standard error response shape."""
+    code: str
+    message: str
+    context: dict | None = None
+    statusCode: int
+
+
+class APIError(Exception):
+    """Structured API error that produces a standard JSON response."""
+    def __init__(self, status_code: int, code: str, message: str,
+                 context: dict | None = None, headers: dict | None = None):
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.context = context
+        self.headers = headers
+
+
 app = FastAPI(title="Qwen3-TTS API", lifespan=lifespan)
+
+
+@app.exception_handler(APIError)
+async def api_error_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            code=exc.code, message=exc.message,
+            context=exc.context, statusCode=exc.status_code,
+        ).model_dump(),
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            code="INTERNAL_ERROR", message=str(exc.detail),
+            statusCode=exc.status_code,
+        ).model_dump(),
+        headers=getattr(exc, "headers", None),
+    )
+
 
 model = None
 loaded_model_id = None
@@ -757,7 +801,7 @@ def convert_audio_format(audio_data: np.ndarray, sample_rate: int, output_format
 def resolve_voice(voice: Optional[str]) -> str:
     """Resolve a voice name to a reference audio WAV filename.
 
-    Raises HTTPException 400 if the voice is not in VOICE_MAP.
+    Raises APIError 400 if the voice is not in VOICE_MAP.
     """
     if not voice:
         return DEFAULT_VOICE
@@ -766,10 +810,8 @@ def resolve_voice(voice: Optional[str]) -> str:
     if resolved is None:
         valid = sorted(VOICE_MAP.keys())
         logger.bind(voice=voice).warning("Unknown voice requested")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown voice '{voice}'. Valid voices: {', '.join(valid)}",
-        )
+        raise APIError(400, "UNKNOWN_VOICE", f"Unknown voice '{voice}'",
+                       context={"voice": voice, "valid_voices": valid})
     return resolved
 
 
@@ -980,7 +1022,7 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
     try:
         ref_audio_data, ref_sr = sf.read(io.BytesIO(audio_bytes))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Cannot read reference audio: {e}")
+        raise APIError(400, "INVALID_AUDIO", f"Cannot read reference audio: {e}")
 
     if len(ref_audio_data.shape) > 1:
         ref_audio_data = ref_audio_data.mean(axis=1)
@@ -996,7 +1038,7 @@ def _get_cached_voice_prompt(audio_bytes: bytes, ref_text: str | None):
         )
     except Exception as e:
         logger.opt(exception=True).error("create_voice_clone_prompt failed")
-        raise HTTPException(status_code=500, detail=f"Voice prompt creation failed: {e}")
+        raise APIError(500, "CLONE_FAILED", f"Voice prompt creation failed: {e}")
     logger.bind(cache_key=cache_key[:12], encode_ms=round((time.perf_counter() - t_encode) * 1000)).debug(
         "Voice prompt encoded"
     )
@@ -1059,15 +1101,13 @@ async def synthesize_speech(request: TTSRequest):
     if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
         logger.bind(request_id=request_id, endpoint="/v1/audio/speech",
                      queue_depth=_queue_depth).warning("Request rejected: queue full")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Server busy: {_queue_depth} requests queued. Try again later.",
-            headers={"Retry-After": "5"},
-        )
+        raise APIError(503, "QUEUE_FULL",
+                       f"Server busy: {_queue_depth} requests queued. Try again later.",
+                       headers={"Retry-After": "5"})
 
     if not request.input or not request.input.strip():
         logger.bind(request_id=request_id, endpoint="/v1/audio/speech").warning("Request rejected: empty input")
-        raise HTTPException(status_code=400, detail="Input text is required")
+        raise APIError(400, "EMPTY_INPUT", "Input text is required")
 
     if request.instruct:
         logger.bind(request_id=request_id, endpoint="/v1/audio/speech").warning(
@@ -1156,12 +1196,13 @@ async def synthesize_speech(request: TTSRequest):
     except asyncio.TimeoutError:
         logger.bind(request_id=request_id, endpoint="/v1/audio/speech",
                      timeout_s=REQUEST_TIMEOUT).error("Synthesis timed out")
-        raise HTTPException(status_code=504, detail="Synthesis timed out")
-    except HTTPException:
+        raise APIError(504, "SYNTHESIS_TIMEOUT", "Synthesis timed out",
+                       context={"timeout_s": REQUEST_TIMEOUT})
+    except APIError:
         raise
     except Exception as e:
         logger.bind(request_id=request_id, endpoint="/v1/audio/speech").opt(exception=True).error("Synthesis failed")
-        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+        raise APIError(500, "SYNTHESIS_FAILED", f"Synthesis failed: {str(e)}")
     finally:
         _queue_depth -= 1
 
@@ -1174,7 +1215,7 @@ async def synthesize_speech_stream(request: TTSRequest):
 
     if not request.input or not request.input.strip():
         logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: empty input")
-        raise HTTPException(status_code=400, detail="Input text is required")
+        raise APIError(400, "EMPTY_INPUT", "Input text is required")
 
     voice_file = resolve_voice(request.voice)
     language = request.language or detect_language(request.input)
@@ -1183,7 +1224,7 @@ async def synthesize_speech_stream(request: TTSRequest):
 
     if not sentences:
         logger.bind(endpoint="/v1/audio/speech/stream").warning("Request rejected: no sentences")
-        raise HTTPException(status_code=400, detail="No sentences found in input")
+        raise APIError(400, "NO_SENTENCES", "No sentences found in input")
 
     async def generate():
         t_stream_start = time.perf_counter()
@@ -1297,17 +1338,15 @@ async def clone_voice(
     if MAX_QUEUE_DEPTH > 0 and _queue_depth >= MAX_QUEUE_DEPTH:
         logger.bind(endpoint="/v1/audio/speech/clone",
                      queue_depth=_queue_depth).warning("Request rejected: queue full")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Server busy: {_queue_depth} requests queued. Try again later.",
-            headers={"Retry-After": "5"},
-        )
+        raise APIError(503, "QUEUE_FULL",
+                       f"Server busy: {_queue_depth} requests queued. Try again later.",
+                       headers={"Retry-After": "5"})
 
     await _ensure_model_loaded()
 
     if not input or not input.strip():
         logger.bind(endpoint="/v1/audio/speech/clone").warning("Request rejected: empty input")
-        raise HTTPException(status_code=400, detail="Input text is required")
+        raise APIError(400, "EMPTY_INPUT", "Input text is required")
 
     _queue_depth += 1
     try:
@@ -1371,12 +1410,13 @@ async def clone_voice(
     except asyncio.TimeoutError:
         logger.bind(endpoint="/v1/audio/speech/clone",
                      timeout_s=REQUEST_TIMEOUT).error("Voice clone timed out")
-        raise HTTPException(status_code=504, detail="Voice clone timed out")
-    except HTTPException:
+        raise APIError(504, "SYNTHESIS_TIMEOUT", "Voice clone timed out",
+                       context={"timeout_s": REQUEST_TIMEOUT})
+    except APIError:
         raise
     except Exception as e:
         logger.bind(endpoint="/v1/audio/speech/clone").opt(exception=True).error("Voice clone failed")
-        raise HTTPException(status_code=500, detail=f"Voice clone failed: {str(e)}")
+        raise APIError(500, "CLONE_FAILED", f"Voice clone failed: {str(e)}")
     finally:
         _queue_depth -= 1
 
@@ -1393,7 +1433,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
 
     if not request.input or not request.input.strip():
         logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: empty input")
-        raise HTTPException(status_code=400, detail="Input text is required")
+        raise APIError(400, "EMPTY_INPUT", "Input text is required")
 
     voice_file = resolve_voice(request.voice)
     language = request.language or detect_language(request.input)
@@ -1401,7 +1441,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
     sentences = _split_sentences(text)
     if not sentences:
         logger.bind(endpoint="/v1/audio/speech/stream/pcm").warning("Request rejected: no sentences")
-        raise HTTPException(status_code=400, detail="No sentences found in input")
+        raise APIError(400, "NO_SENTENCES", "No sentences found in input")
 
     async def pcm_generator():
         global _last_used

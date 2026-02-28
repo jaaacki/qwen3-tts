@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.10.2 — 2026-03-01
+
+Standardize error response shape (#109).
+
+### Changed
+- **Error responses**: All API error responses now use a standard JSON shape: `{"code": "ERROR_CODE", "message": "...", "context": {...}, "statusCode": N}` instead of FastAPI's default `{"detail": "..."}`
+- **`raise HTTPException`** replaced with **`raise APIError`** across all endpoints — carries structured `code`, `message`, `context`, and optional `headers`
+- **Error codes**: `QUEUE_FULL`, `EMPTY_INPUT`, `UNKNOWN_VOICE`, `SYNTHESIS_TIMEOUT`, `SYNTHESIS_FAILED`, `INVALID_AUDIO`, `CLONE_FAILED`, `NO_SENTENCES`
+- **Fallback handler**: Any remaining `HTTPException` (e.g. from FastAPI validation) is caught by a global handler and wrapped in the standard `ErrorResponse` shape with code `INTERNAL_ERROR`
+
+### Added
+- `ErrorResponse` Pydantic model — standard error body shape
+- `APIError` exception class — structured API errors with `status_code`, `code`, `message`, `context`, `headers`
+- `api_error_handler` — FastAPI exception handler for `APIError`
+- `http_exception_handler` — FastAPI exception handler for `HTTPException` fallback
+- Unit tests for `ErrorResponse`, `APIError`, and `resolve_voice` error path
+
+---
+
 ## v0.10.0 — 2026-02-24
 
 Switch from CustomVoice to Base model — enables voice cloning support.
