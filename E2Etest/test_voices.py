@@ -52,7 +52,8 @@ class TestVoiceMapping:
                 json={"input": TEXT, "voice": "custom_voice_xyz", "response_format": "wav"},
             )
         assert response.status_code == 400
-        assert "voice" in response.json().get("detail", "").lower()
+        body = response.json()
+        assert body.get("code") == "UNKNOWN_VOICE" or "voice" in body.get("message", "").lower()
 
 
 class TestVoiceOutput:
