@@ -38,7 +38,7 @@ services:
       UNIX_SOCKET_PATH: ""
       SSL_KEYFILE: ""
       SSL_CERTFILE: ""
-      QUANTIZE: "int8"
+      QUANTIZE: ""
       GATEWAY_MODE: "false"
     ports:
       - "8101:8000"

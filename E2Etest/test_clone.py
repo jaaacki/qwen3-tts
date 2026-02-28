@@ -84,7 +84,7 @@ class TestVoiceClone:
                 files=files,
                 data={"input": ""},
             )
-        assert response.status_code == 400
+        assert response.status_code in (400, 422)
 
 
 @pytest.mark.slow

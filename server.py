@@ -490,13 +490,17 @@ def _load_model_sync():
     if os.getenv("TORCH_COMPILE", "true").lower() == "true":
         try:
             compile_mode = TORCH_COMPILE_MODE
-            compile_options = {}
-            if CUDA_GRAPHS and torch.cuda.is_available():
-                compile_options["triton.cudagraphs"] = True
+            # PyTorch doesn't allow both mode and options simultaneously.
+            # max-autotune already enables CUDA graphs internally, so only
+            # pass explicit options when using a mode that doesn't (e.g. "default").
+            if CUDA_GRAPHS and torch.cuda.is_available() and compile_mode not in ("max-autotune", "max-autotune-no-cudagraphs"):
+                compile_options: dict | None = {"triton.cudagraphs": True}
+            else:
+                compile_options = None
             model.model = torch.compile(
-                model.model, mode=compile_mode, fullgraph=False, options=compile_options or None,
+                model.model, mode=compile_mode, fullgraph=False, options=compile_options,
             )
-            logger.bind(compile_mode=compile_mode, cuda_graphs=bool(compile_options.get("triton.cudagraphs"))).success(
+            logger.bind(compile_mode=compile_mode, cuda_graphs=CUDA_GRAPHS).success(
                 "torch.compile enabled"
             )
         except Exception as e:
