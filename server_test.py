@@ -20,7 +20,7 @@ with patch.dict("sys.modules", _mock_modules):
     from server import (
         _trim_silence, _normalize_text, _expand_currency,
         _detect_language_unicode, _get_langdetect, detect_language,
-        _adjust_speed, resolve_voice, _LANG_MAP,
+        _adjust_speed, _resample_audio, resolve_voice, _LANG_MAP,
         _get_cached_voice_prompt, _split_sentences, _adaptive_max_tokens,
         _audio_cache_key, _get_audio_cache, _set_audio_cache,
         _audio_cache, _AUDIO_CACHE_MAX, _build_gen_kwargs,
@@ -309,6 +309,29 @@ class TestAdjustSpeedFallback:
         audio = np.array([0.1], dtype=np.float32)
         with patch.object(server, "_pyrubberband", None):
             result = _adjust_speed(audio, 24000, 100.0)
+        np.testing.assert_array_equal(result, audio)
+
+
+# --- Server-side sample rate conversion tests ---
+
+
+class TestResampleAudio:
+    def test_resample_24k_to_8k(self):
+        """Downsampling 24kHz to 8kHz should produce 1/3 the samples."""
+        audio = np.random.randn(24000).astype(np.float32)
+        result = _resample_audio(audio, 24000, 8000)
+        assert len(result) == 8000
+
+    def test_resample_noop_same_rate(self):
+        """Same input/output rate returns original array."""
+        audio = np.random.randn(24000).astype(np.float32)
+        result = _resample_audio(audio, 24000, 24000)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_resample_none_target_noop(self):
+        """None target rate returns original array."""
+        audio = np.random.randn(24000).astype(np.float32)
+        result = _resample_audio(audio, 24000, None)
         np.testing.assert_array_equal(result, audio)
 
 
