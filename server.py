@@ -565,9 +565,14 @@ def _load_model_sync():
         try:
             dummy = torch.empty(64 * 1024 * 1024, dtype=torch.bfloat16, device="cuda")
             del dummy
+            torch.cuda.empty_cache()
             logger.debug("CUDA pool pre-warmed (128 MB dummy tensor)")
         except Exception as e:
             logger.warning("CUDA pool pre-warm failed: {}", e)
+
+    # Release all unused cached memory back to the driver
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     _last_used = time.time()
     if _prometheus_available:
