@@ -91,6 +91,8 @@ Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloni
 
 **Logging**: loguru with `_InterceptHandler` routing all uvicorn/FastAPI stdlib logs. JSON (`LOG_FORMAT=json`) or human-readable (`LOG_FORMAT=text`). Structured context via `logger.bind()` on every log point. Coverage: startup config dump, cache hit/miss/eviction (DEBUG), all request errors/timeouts (ERROR with traceback), validation rejections (WARNING), streaming completion events, WebSocket lifecycle, idle watchdog triggers, inference queue dispatch decisions (DEBUG).
 
+**Gateway mode** (`GATEWAY_MODE=true`): `gateway.py` starts as a lightweight proxy (~30 MB RAM), spawning `worker.py` as a subprocess on first request. The worker runs the full `server.py` on an internal port with `PRELOAD_MODEL=true` and `IDLE_TIMEOUT=0` (gateway manages idle shutdown instead). All requests are proxied via `aiohttp`. Not used in default deployment.
+
 ## Key Environment Variables
 
 | Variable | Default | Description |
@@ -110,6 +112,7 @@ Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloni
 | `INFERENCE_CPU_CORES` | `` | CPU affinity spec (e.g. `0-3,6`) for GPU-adjacent cores |
 | `UNIX_SOCKET_PATH` | `` | Run on UDS instead of TCP (bypasses TCP stack) |
 | `SSL_KEYFILE` / `SSL_CERTFILE` | `` | Enable HTTP/2 via TLS |
+| `GATEWAY_MODE` | `false` | Use gateway/worker subprocess architecture |
 
 ## Important Details
 
@@ -121,3 +124,11 @@ Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloni
 - Language detection: `fasttext-langdetect` if installed, else Unicode character range heuristic (`_detect_language_unicode`)
 - Streaming endpoints (`/stream`, `/stream/pcm`, `/ws`) split text into sentences via `_split_sentences()` and synthesize each independently — no cross-sentence context
 - `docker-entrypoint.sh` handles GPU persistence mode, clock locking, THP, jemalloc, and UDS/TLS startup branching
+
+## Workflow Rules
+
+`.agent-rules/` contains workflow directives for multi-agent and autonomous development:
+- `prompt_git-workflow-rules.md` — every change starts with a GitHub issue; branch naming (`issue-{N}-desc`), PR conventions, milestone-based branching
+- `prompt_testing-rules.md` — tests ship with code in the same PR; always report results after running tests
+- `prompt_docs-versioning-rules.md` — CHANGELOG.md, README.md, ROADMAP.md, LEARNING_LOG.md updated after every completed issue; semver: one issue = patch bump, milestone merge = minor bump
+- `prompt_agent-team-rules.md` — Architect/Builder/Critic roles for parallel agent work

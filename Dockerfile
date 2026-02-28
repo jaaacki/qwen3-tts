@@ -1,20 +1,6 @@
-# Stage 1: builder — install Python deps with build tools
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS builder
-
-WORKDIR /build
-
-# git is needed by qwen-tts install
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
-# Optional quantization
-RUN pip install --no-cache-dir --prefix=/install "bitsandbytes>=0.43.0" || true
-
-# Stage 2: runtime — lean image with only what's needed
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+# Single-stage build using devel image — ensures flash-attn compiles
+# against the same PyTorch it runs with (no ABI mismatch).
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
 WORKDIR /app
 
@@ -31,18 +17,27 @@ ENV OMP_NUM_THREADS=2
 ENV MKL_NUM_THREADS=2
 
 # jemalloc replaces ptmalloc2 to reduce RSS bloat from arena fragmentation
-# Path assumes x86_64 Linux; for aarch64 use /usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
 
-# Install runtime-only system dependencies (no git, no build tools)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 libopus-dev \
+    git libsndfile1 ffmpeg sox rubberband-cli libjemalloc2 libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed Python packages from builder into conda's site-packages
-COPY --from=builder /install/lib/python3.11/site-packages/ /opt/conda/lib/python3.11/site-packages/
-COPY --from=builder /install/bin/ /opt/conda/bin/
+# Install Python dependencies
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# FlashAttention 2 — force source compilation matching PyTorch's CXX11 ABI=0.
+# RTX 4060 = sm_89 (Ada Lovelace) — only build for this arch.
+RUN FLASH_ATTENTION_FORCE_BUILD=TRUE \
+    TORCH_CUDA_ARCH_LIST="8.9" \
+    MAX_JOBS=2 \
+    pip install --no-cache-dir flash-attn --no-build-isolation
+
+# Optional quantization
+RUN pip install --no-cache-dir "bitsandbytes>=0.43.0" || true
 
 # Copy application
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh

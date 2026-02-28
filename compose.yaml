@@ -1,37 +1,49 @@
+# ===========================================================================
+# Qwen3-TTS — Text-to-Speech GPU service
+#
+# Joins freepbx-net so voice-platform can reach it as "qwen3-tts"
+#
+# Usage:
+#   docker compose up -d
+# ===========================================================================
+
+networks:
+  freepbx-net:
+    external: true
+
 services:
   qwen3-tts:
-    build: .
+    container_name: qwen3-tts
+    build:
+      context: .
     image: qwen3-tts-local:cuda124
-    container_name: qwen3_tts
     restart: unless-stopped
+    environment:
+      MODEL_ID: "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      REQUEST_TIMEOUT: "300"
+      IDLE_TIMEOUT: "0"
+      AUDIO_CACHE_MAX: "256"
+      TORCH_COMPILE: "true"
+      VAD_TRIM: "true"
+      TEXT_NORMALIZE: "true"
+      VOICE_CACHE_MAX: "32"
+      PRELOAD_MODEL: "true"
+      LD_PRELOAD: "/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
+      MALLOC_CONF: "background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0"
+      INFERENCE_CPU_CORES: ""
+      MAX_QUEUE_DEPTH: "5"
+      UNIX_SOCKET_PATH: ""
+      SSL_KEYFILE: ""
+      SSL_CERTFILE: ""
+      GATEWAY_MODE: "false"
     ports:
       - "8101:8000"
-    environment:
-      - MODEL_ID=Qwen/Qwen3-TTS-12Hz-0.6B-Base
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - REQUEST_TIMEOUT=300
-      - IDLE_TIMEOUT=0          # 0 = never unload (always-on mode)
-      - AUDIO_CACHE_MAX=256
-      - TORCH_COMPILE=true
-      - VAD_TRIM=true
-      - TEXT_NORMALIZE=true
-      - VOICE_CACHE_MAX=32
-      - PRELOAD_MODEL=true      # true = load model at startup instead of first request
-      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-      - MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0
-      - INFERENCE_CPU_CORES=
-      - MAX_QUEUE_DEPTH=5       # 0 = unlimited, 503 when queue exceeds this
-      # UDS bypasses TCP for same-host clients; disables TCP binding when set
-      # Use: curl --unix-socket /path/to/socket http://localhost/health
-      - UNIX_SOCKET_PATH=
-      # TLS cert paths enable HTTP/2 (h2c cleartext HTTP/2 not supported by most clients)
-      # Set both to PEM file paths inside the container to enable HTTPS + HTTP/2
-      - SSL_KEYFILE=
-      - SSL_CERTFILE=
-      - GATEWAY_MODE=false   # set true for lightweight proxy mode (~30 MB idle vs ~1 GB)
     volumes:
       - ./models:/root/.cache/huggingface
-    ipc: host  # Share host IPC namespace — reduces CUDA IPC overhead for GPU tensor sharing
+    networks:
+      - freepbx-net
+    ipc: host
     shm_size: "1g"
     deploy:
       resources:
@@ -45,4 +57,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s  # Increase if PRELOAD_MODEL=true (model load takes 10-15s)
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
