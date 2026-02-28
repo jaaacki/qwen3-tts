@@ -85,7 +85,11 @@ Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloni
 
 **instruct parameter**: Accepted for API backwards compatibility but silently ignored — the Base model does not support instruction-controlled synthesis. A warning is logged when `instruct` is set.
 
-**Model loading**: Uses `flash_attention_2` if `flash-attn` is installed, falls back to `sdpa`. After loading, pre-computes voice prompts from reference WAVs, runs multi-length GPU warmup via `generate_voice_clone()`, and pre-warms CUDA memory pool. `torch.compile(mode="reduce-overhead")` is applied unless `TORCH_COMPILE=false`.
+**Model loading**: Uses `flash_attention_2` if `flash-attn` is installed, falls back to `sdpa`. After loading, creates dedicated CUDA inference/transfer streams, pre-computes voice prompts from reference WAVs, runs multi-length GPU warmup via `generate_voice_clone()`, and pre-warms CUDA memory pool. `torch.compile(mode=TORCH_COMPILE_MODE)` is applied with optional `triton.cudagraphs` unless `TORCH_COMPILE=false`. INT8 quantization via bitsandbytes enabled by default (`QUANTIZE=int8`).
+
+**Sentence pipelining**: Streaming endpoints (`/stream`, `/stream/pcm`, `/ws`) pipeline sentence synthesis — sentence N+1 is submitted to GPU while sentence N's audio is being yielded. This hides encoding and network latency between sentences.
+
+**Server-side resampling**: All speech endpoints accept an optional `sample_rate` parameter. When set (e.g. `8000` for telephony), the server resamples via `scipy.signal.resample` before returning, eliminating client-side resampling overhead.
 
 **Adaptive token budget**: `_adaptive_max_tokens()` scales `max_new_tokens` (128–2048) based on text length and CJK character ratio, avoiding fixed 2048 allocation for short inputs.
 
@@ -102,6 +106,9 @@ Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloni
 | `REQUEST_TIMEOUT` | `300` | Max seconds per inference request |
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of first request |
 | `TORCH_COMPILE` | `true` | Enable `torch.compile` on the model |
+| `TORCH_COMPILE_MODE` | `max-autotune` | torch.compile mode (`max-autotune`, `reduce-overhead`, `default`) |
+| `CUDA_GRAPHS` | `true` | Enable CUDA graph capture via triton backend |
+| `QUANTIZE` | `int8` | Quantization mode (`int8`, `fp8`, or empty to disable) |
 | `PROMETHEUS_ENABLED` | `true` | Expose `/metrics` endpoint |
 | `LOG_FORMAT` | `json` | `json` or `text` log format |
 | `LOG_LEVEL` | `INFO` | Minimum log level (DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL) |
@@ -122,7 +129,7 @@ Clone tests exercise the `/v1/audio/speech/clone` endpoint with real voice cloni
 - Audio format: WAV/FLAC/OGG use `soundfile`; MP3/Opus use `pydub`; WAV can use `torchaudio` if available
 - Speed adjustment: `pyrubberband` (pitch-preserving, preferred) or `scipy.signal.resample` (fallback)
 - Language detection: `fasttext-langdetect` if installed, else Unicode character range heuristic (`_detect_language_unicode`)
-- Streaming endpoints (`/stream`, `/stream/pcm`, `/ws`) split text into sentences via `_split_sentences()` and synthesize each independently — no cross-sentence context
+- Streaming endpoints (`/stream`, `/stream/pcm`, `/ws`) split text into sentences via `_split_sentences()` and synthesize each with pipelined pre-fetching — no cross-sentence context
 - `docker-entrypoint.sh` handles GPU persistence mode, clock locking, THP, jemalloc, and UDS/TLS startup branching
 
 ## Workflow Rules
