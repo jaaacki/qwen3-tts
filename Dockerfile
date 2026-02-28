@@ -38,6 +38,7 @@ RUN FLASH_ATTENTION_FORCE_BUILD=TRUE \
 
 # Optional quantization
 RUN pip install --no-cache-dir "bitsandbytes>=0.43.0" || true
+RUN pip install --no-cache-dir torchao || true
 
 # Copy application
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh

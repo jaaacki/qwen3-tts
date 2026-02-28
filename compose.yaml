@@ -3,6 +3,8 @@
 #
 # Joins freepbx-net so voice-platform can reach it as "qwen3-tts"
 #
+# Configuration: edit .env file (docker compose picks it up automatically)
+#
 # Usage:
 #   docker compose up -d
 # ===========================================================================
@@ -18,28 +20,7 @@ services:
       context: .
     image: qwen3-tts-local:cuda124
     restart: unless-stopped
-    environment:
-      MODEL_ID: "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
-      REQUEST_TIMEOUT: "300"
-      IDLE_TIMEOUT: "0"
-      AUDIO_CACHE_MAX: "256"
-      TORCH_COMPILE: "true"
-      TORCH_COMPILE_MODE: "max-autotune"
-      CUDA_GRAPHS: "true"
-      VAD_TRIM: "true"
-      TEXT_NORMALIZE: "true"
-      VOICE_CACHE_MAX: "32"
-      PRELOAD_MODEL: "true"
-      LD_PRELOAD: "/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
-      MALLOC_CONF: "background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:0"
-      INFERENCE_CPU_CORES: ""
-      MAX_QUEUE_DEPTH: "5"
-      UNIX_SOCKET_PATH: ""
-      SSL_KEYFILE: ""
-      SSL_CERTFILE: ""
-      QUANTIZE: ""
-      GATEWAY_MODE: "false"
+    env_file: .env
     ports:
       - "8101:8000"
     volumes:

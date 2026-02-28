@@ -429,15 +429,15 @@ def _resolve_quant_kwargs() -> tuple[torch.dtype, dict]:
         return torch.float16, {"load_in_8bit": True}
 
     if QUANTIZE == "fp8":
+        # FP8 is applied post-load via torchao — just validate the import here
         try:
-            from transformers import TorchAoConfig
-            quant_config = TorchAoConfig("fp8_dynamic_activation_fp8_weight")
-        except (ImportError, Exception) as exc:
+            import torchao  # noqa: F401
+        except ImportError:
             raise ImportError(
                 "torchao is required for QUANTIZE=fp8. "
                 "Install it: pip install torchao>=0.5.0"
-            ) from exc
-        return torch.bfloat16, {"quantization_config": quant_config}
+            )
+        return torch.bfloat16, {}
 
     raise ValueError(
         f"Unknown QUANTIZE value: {QUANTIZE!r}. Must be 'int8', 'fp8', or unset."
@@ -478,6 +478,15 @@ def _load_model_sync():
         attn_implementation=attn_impl,
         **quant_kwargs,
     )
+
+    # Apply post-load FP8 quantization via torchao
+    if QUANTIZE == "fp8":
+        try:
+            from torchao.quantization import quantize_, Float8WeightOnlyConfig
+            quantize_(model.model, Float8WeightOnlyConfig())
+            logger.success("FP8 weight quantization applied via torchao")
+        except Exception as e:
+            logger.warning("FP8 quantization failed, continuing without: {}", e)
 
     # Create dedicated CUDA streams for overlapping compute + transfer
     global _inference_stream, _transfer_stream
