@@ -1165,19 +1165,44 @@ async def synthesize_speech_stream(request: TTSRequest):
     async def generate():
         t_stream_start = time.perf_counter()
         chunks_sent = 0
-        for sentence in sentences:
-            try:
-                t_sent = time.perf_counter()
-                gen_kwargs = _build_gen_kwargs(sentence, request)
-                wavs, sr = await asyncio.wait_for(
+
+        def _make_synth_fn(s, gk):
+            return lambda: _do_synthesize(s, language, voice_file, gk)
+
+        # Pre-fetch: submit first sentence immediately
+        pending_future = None
+        sentence_idx = 0
+
+        if sentences:
+            gk = _build_gen_kwargs(sentences[0], request)
+            pending_future = asyncio.ensure_future(
+                asyncio.wait_for(
                     _infer_queue.submit(
-                        lambda s=sentence: _do_synthesize(
-                            s, language, voice_file, gen_kwargs,
-                        ),
+                        _make_synth_fn(sentences[0], gk),
                         priority=PRIORITY_REALTIME,
                     ),
                     timeout=REQUEST_TIMEOUT,
                 )
+            )
+
+        while sentence_idx < len(sentences):
+            try:
+                t_sent = time.perf_counter()
+                wavs, sr_val = await pending_future
+
+                # Pre-fetch next sentence while we process current
+                next_idx = sentence_idx + 1
+                if next_idx < len(sentences):
+                    gk_next = _build_gen_kwargs(sentences[next_idx], request)
+                    pending_future = asyncio.ensure_future(
+                        asyncio.wait_for(
+                            _infer_queue.submit(
+                                _make_synth_fn(sentences[next_idx], gk_next),
+                                priority=PRIORITY_REALTIME,
+                            ),
+                            timeout=REQUEST_TIMEOUT,
+                        )
+                    )
 
                 audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
                 if audio_data.ndim > 1:
@@ -1189,17 +1214,18 @@ async def synthesize_speech_stream(request: TTSRequest):
                         audio_data = scipy_signal.resample(audio_data, new_length)
 
                 if request.sample_rate:
-                    audio_data = _resample_audio(audio_data, sr, request.sample_rate)
+                    audio_data = _resample_audio(audio_data, sr_val, request.sample_rate)
 
                 audio_int16 = (audio_data * 32767).astype(np.int16)
                 pcm_bytes = audio_int16.tobytes()
                 yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
                 logger.bind(
                     sentence_idx=chunks_sent,
-                    chars=len(sentence),
+                    chars=len(sentences[sentence_idx]),
                     ms=round((time.perf_counter() - t_sent) * 1000),
                 ).debug("sentence_synthesized")
                 chunks_sent += 1
+                sentence_idx += 1
 
                 _last_used = time.time()
 
@@ -1358,18 +1384,44 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
         global _last_used
         t_pcm_start = time.perf_counter()
         chunks_sent = 0
-        for sentence in sentences:
-            gen_kwargs = _build_gen_kwargs(sentence, request)
-            try:
-                wavs, sr = await asyncio.wait_for(
+
+        def _make_synth_fn(s, gk):
+            return lambda: _do_synthesize(s, language, voice_file, gk)
+
+        # Pre-fetch: submit first sentence immediately
+        pending_future = None
+        sentence_idx = 0
+
+        if sentences:
+            gk = _build_gen_kwargs(sentences[0], request)
+            pending_future = asyncio.ensure_future(
+                asyncio.wait_for(
                     _infer_queue.submit(
-                        lambda s=sentence: _do_synthesize(
-                            s, language, voice_file, gen_kwargs
-                        ),
+                        _make_synth_fn(sentences[0], gk),
                         priority=PRIORITY_REALTIME,
                     ),
                     timeout=REQUEST_TIMEOUT,
                 )
+            )
+
+        while sentence_idx < len(sentences):
+            try:
+                wavs, sr_val = await pending_future
+
+                # Pre-fetch next sentence while we process current
+                next_idx = sentence_idx + 1
+                if next_idx < len(sentences):
+                    gk_next = _build_gen_kwargs(sentences[next_idx], request)
+                    pending_future = asyncio.ensure_future(
+                        asyncio.wait_for(
+                            _infer_queue.submit(
+                                _make_synth_fn(sentences[next_idx], gk_next),
+                                priority=PRIORITY_REALTIME,
+                            ),
+                            timeout=REQUEST_TIMEOUT,
+                        )
+                    )
+
                 _last_used = time.time()
                 audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
                 if audio_data.ndim > 1:
@@ -1379,11 +1431,13 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                     if new_length > 0:
                         audio_data = scipy_signal.resample(audio_data, new_length)
                 if request.sample_rate:
-                    audio_data = _resample_audio(audio_data, sr, request.sample_rate)
+                    audio_data = _resample_audio(audio_data, sr_val, request.sample_rate)
                 pcm_data = np.clip(audio_data, -1.0, 1.0)
                 pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
                 yield pcm_bytes
                 chunks_sent += 1
+                sentence_idx += 1
+
             except asyncio.TimeoutError:
                 logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                              chunks_sent=chunks_sent, timeout_s=REQUEST_TIMEOUT).error("PCM stream timed out")
@@ -1392,6 +1446,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
                 logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                              chunks_sent=chunks_sent).opt(exception=True).error("PCM stream failed")
                 break
+
         logger.bind(endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
                      language=language, sentences=len(sentences), chunks_sent=chunks_sent,
                      chars=len(text), total_ms=round((time.perf_counter() - t_pcm_start) * 1000),
@@ -1440,19 +1495,49 @@ async def ws_synthesize(websocket: WebSocket):
             if not sentences:
                 sentences = [text]
 
-            for sentence in sentences:
-                gen_kwargs = {"max_new_tokens": _adaptive_max_tokens(sentence)}
+            def _ws_make_synth_fn(s, gk):
+                return lambda: _do_synthesize(s, language, voice_file, gk)
+
+            def _ws_build_gen_kwargs(s):
+                gk = {"max_new_tokens": _adaptive_max_tokens(s)}
                 if ws_temperature is not None:
-                    gen_kwargs["temperature"] = float(ws_temperature)
+                    gk["temperature"] = float(ws_temperature)
                 if ws_top_p is not None:
-                    gen_kwargs["top_p"] = float(ws_top_p)
-                wavs, sr = await asyncio.wait_for(
-                    _infer_queue.submit(
-                        lambda s=sentence: _do_synthesize(s, language, voice_file, gen_kwargs),
-                        priority=PRIORITY_REALTIME,
-                    ),
-                    timeout=REQUEST_TIMEOUT,
+                    gk["top_p"] = float(ws_top_p)
+                return gk
+
+            # Pre-fetch: submit first sentence immediately
+            pending_future = None
+            sentence_idx = 0
+
+            if sentences:
+                gk = _ws_build_gen_kwargs(sentences[0])
+                pending_future = asyncio.ensure_future(
+                    asyncio.wait_for(
+                        _infer_queue.submit(
+                            _ws_make_synth_fn(sentences[0], gk),
+                            priority=PRIORITY_REALTIME,
+                        ),
+                        timeout=REQUEST_TIMEOUT,
+                    )
                 )
+
+            while sentence_idx < len(sentences):
+                wavs, sr_val = await pending_future
+
+                # Pre-fetch next sentence while we process current
+                next_idx = sentence_idx + 1
+                if next_idx < len(sentences):
+                    gk_next = _ws_build_gen_kwargs(sentences[next_idx])
+                    pending_future = asyncio.ensure_future(
+                        asyncio.wait_for(
+                            _infer_queue.submit(
+                                _ws_make_synth_fn(sentences[next_idx], gk_next),
+                                priority=PRIORITY_REALTIME,
+                            ),
+                            timeout=REQUEST_TIMEOUT,
+                        )
+                    )
 
                 audio_data = np.array(wavs[0], dtype=np.float32, copy=True)
                 if audio_data.ndim > 1:
@@ -1464,12 +1549,13 @@ async def ws_synthesize(websocket: WebSocket):
                         audio_data = scipy_signal.resample(audio_data, new_length)
 
                 if ws_sample_rate:
-                    audio_data = _resample_audio(audio_data, sr, int(ws_sample_rate))
+                    audio_data = _resample_audio(audio_data, sr_val, int(ws_sample_rate))
 
                 pcm = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
                 await websocket.send_bytes(pcm)
                 global _last_used
                 _last_used = time.time()
+                sentence_idx += 1
 
             await websocket.send_json({"event": "done"})
             messages_handled += 1
