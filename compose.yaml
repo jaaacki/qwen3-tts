@@ -25,6 +25,7 @@ services:
       IDLE_TIMEOUT: "0"
       AUDIO_CACHE_MAX: "256"
       TORCH_COMPILE: "true"
+      TORCH_COMPILE_MODE: "max-autotune"
       VAD_TRIM: "true"
       TEXT_NORMALIZE: "true"
       VOICE_CACHE_MAX: "32"

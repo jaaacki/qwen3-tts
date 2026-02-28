@@ -287,6 +287,10 @@ _queue_depth = 0
 # Quantization mode — "", "int8" (bitsandbytes), or "fp8" (torchao)
 QUANTIZE = os.getenv("QUANTIZE", "").lower()
 
+# torch.compile mode — "max-autotune" (slower warmup, faster steady-state),
+# "reduce-overhead", or "default"
+TORCH_COMPILE_MODE = os.getenv("TORCH_COMPILE_MODE", "max-autotune")
+
 # Batch inference — max jobs per GPU dispatch (1 = disabled)
 MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "4"))
 
@@ -344,6 +348,7 @@ logger.bind(
     MAX_BATCH_SIZE=MAX_BATCH_SIZE,
     AUDIO_CACHE_MAX=_AUDIO_CACHE_MAX,
     VOICE_CACHE_MAX=VOICE_CACHE_MAX,
+    TORCH_COMPILE_MODE=TORCH_COMPILE_MODE,
 ).info("Server configuration loaded")
 
 # Reference audio directory — each voice is backed by a pre-generated WAV file
@@ -468,8 +473,9 @@ def _load_model_sync():
     # Compile model for faster inference (PyTorch 2.0+)
     if os.getenv("TORCH_COMPILE", "true").lower() == "true":
         try:
-            model.model = torch.compile(model.model, mode="reduce-overhead", fullgraph=False)
-            logger.success("torch.compile enabled (mode=reduce-overhead)")
+            compile_mode = TORCH_COMPILE_MODE
+            model.model = torch.compile(model.model, mode=compile_mode, fullgraph=False)
+            logger.bind(compile_mode=compile_mode).success("torch.compile enabled")
         except Exception as e:
             logger.warning("torch.compile not available or failed: {}", e)
 
