@@ -125,6 +125,10 @@ if torch.cuda.is_available():
 else:
     logger.warning("CUDA not available — running on CPU, performance will be poor")
 
+# CUDA streams — overlap inference compute with data transfer
+_inference_stream: torch.cuda.Stream | None = None
+_transfer_stream: torch.cuda.Stream | None = None
+
 # Eager model preload on startup (default: false)
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "false").lower() in ("true", "1")
 
@@ -291,6 +295,9 @@ QUANTIZE = os.getenv("QUANTIZE", "").lower()
 # "reduce-overhead", or "default"
 TORCH_COMPILE_MODE = os.getenv("TORCH_COMPILE_MODE", "max-autotune")
 
+# CUDA graphs via triton backend — enables automatic graph capture/replay
+CUDA_GRAPHS = os.getenv("CUDA_GRAPHS", "true").lower() in ("true", "1")
+
 # Batch inference — max jobs per GPU dispatch (1 = disabled)
 MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "4"))
 
@@ -349,6 +356,7 @@ logger.bind(
     AUDIO_CACHE_MAX=_AUDIO_CACHE_MAX,
     VOICE_CACHE_MAX=VOICE_CACHE_MAX,
     TORCH_COMPILE_MODE=TORCH_COMPILE_MODE,
+    CUDA_GRAPHS=CUDA_GRAPHS,
 ).info("Server configuration loaded")
 
 # Reference audio directory — each voice is backed by a pre-generated WAV file
@@ -390,6 +398,7 @@ class TTSRequest(BaseModel):
     instruct: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
+    sample_rate: Optional[int] = None
 
 
 def _release_gpu_full():
@@ -470,12 +479,26 @@ def _load_model_sync():
         **quant_kwargs,
     )
 
+    # Create dedicated CUDA streams for overlapping compute + transfer
+    global _inference_stream, _transfer_stream
+    if torch.cuda.is_available():
+        _inference_stream = torch.cuda.Stream()
+        _transfer_stream = torch.cuda.Stream()
+        logger.info("CUDA inference and transfer streams created")
+
     # Compile model for faster inference (PyTorch 2.0+)
     if os.getenv("TORCH_COMPILE", "true").lower() == "true":
         try:
             compile_mode = TORCH_COMPILE_MODE
-            model.model = torch.compile(model.model, mode=compile_mode, fullgraph=False)
-            logger.bind(compile_mode=compile_mode).success("torch.compile enabled")
+            compile_options = {}
+            if CUDA_GRAPHS and torch.cuda.is_available():
+                compile_options["triton.cudagraphs"] = True
+            model.model = torch.compile(
+                model.model, mode=compile_mode, fullgraph=False, options=compile_options or None,
+            )
+            logger.bind(compile_mode=compile_mode, cuda_graphs=bool(compile_options.get("triton.cudagraphs"))).success(
+                "torch.compile enabled"
+            )
         except Exception as e:
             logger.warning("torch.compile not available or failed: {}", e)
 
@@ -835,6 +858,16 @@ def _adjust_speed(audio_data: np.ndarray, sample_rate: int, speed: float) -> np.
     return audio_data
 
 
+def _resample_audio(audio_data: np.ndarray, source_rate: int, target_rate: int | None) -> np.ndarray:
+    """Resample audio to target sample rate. Returns original if rates match or target is None."""
+    if target_rate is None or target_rate == source_rate:
+        return audio_data
+    num_samples = int(len(audio_data) * target_rate / source_rate)
+    if num_samples <= 0:
+        return audio_data
+    return scipy_signal.resample(audio_data, num_samples).astype(np.float32)
+
+
 def _split_sentences(text: str) -> list[str]:
     """Split text into sentences, aware of common abbreviations and CJK punctuation."""
     pattern = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!|\u3002|\uff01|\uff1f)\s+'
@@ -850,13 +883,24 @@ def _do_synthesize(text, language, voice_file, gen_kwargs, instruct=None):
     does not support it).
     """
     prompt = _voice_prompts[voice_file]
+    stream = _inference_stream
     with torch.inference_mode():
-        wavs, sr = model.generate_voice_clone(
-            text=text,
-            language=language,
-            voice_clone_prompt=prompt,
-            **gen_kwargs,
-        )
+        if stream is not None:
+            with torch.cuda.stream(stream):
+                wavs, sr = model.generate_voice_clone(
+                    text=text,
+                    language=language,
+                    voice_clone_prompt=prompt,
+                    **gen_kwargs,
+                )
+            stream.synchronize()
+        else:
+            wavs, sr = model.generate_voice_clone(
+                text=text,
+                language=language,
+                voice_clone_prompt=prompt,
+                **gen_kwargs,
+            )
     return wavs, sr
 
 
@@ -1025,6 +1069,10 @@ async def synthesize_speech(request: TTSRequest):
             audio_data = audio_data.squeeze()
 
         audio_data = _adjust_speed(audio_data, sr, request.speed)
+
+        if request.sample_rate:
+            audio_data = _resample_audio(audio_data, sr, request.sample_rate)
+            sr = request.sample_rate
 
         audio_bytes, content_type = await _encode_audio_async(
             audio_data, sr, request.response_format
