@@ -2,18 +2,24 @@
 
 ## v0.10.1 — 2026-03-01
 
-Standardize structured logging output (#107).
+Standardize logging, environment config, and error handling (#107, #108, #109).
 
 ### Changed
-- **`_json_sink`**: timestamp now ISO 8601 with timezone and fractional seconds via `record["time"].isoformat()` (was `strftime("%Y-%m-%dT%H:%M:%S")`)
-- **`_json_sink`**: level names remapped to lowercase ops convention — `CRITICAL`→`fatal`, `WARNING`→`warn`, `SUCCESS`→`info`, others lowercased
-- **`_json_sink`**: output to `sys.stdout` instead of `sys.stderr`
+- **Logging**: JSON timestamp now full ISO 8601 with timezone and fractional seconds (#107)
+- **Logging**: level names remapped to ops convention — `fatal`, `error`, `warn`, `info`, `debug`, `trace` (#107)
+- **Logging**: JSON output to `stdout` instead of `stderr` (#107)
+- **Error responses**: standard JSON shape `{code, message, context, statusCode}` replaces `{detail}` (#109)
+- **Error codes**: `QUEUE_FULL`, `EMPTY_INPUT`, `UNKNOWN_VOICE`, `SYNTHESIS_TIMEOUT`, `SYNTHESIS_FAILED`, `INVALID_AUDIO`, `CLONE_FAILED`, `NO_SENTENCES` (#109)
 
 ### Added
-- `"service": "qwen3-tts"` field in every JSON log entry
-- `_LEVEL_REMAP` dict for level name normalization
-- `request_id` to `/v1/audio/speech/stream`, `/v1/audio/speech/stream/pcm`, `/v1/audio/speech/clone` endpoints — all logger calls within these endpoints now include `request_id`
-- `request_id` alias for `ws_id` in WebSocket `/v1/audio/speech/ws` endpoint — both fields emitted for backwards compatibility
+- `"service": "qwen3-tts"` field in every JSON log entry (#107)
+- `request_id` on all request endpoints — `/stream`, `/stream/pcm`, `/clone`, `/ws` (#107)
+- `ErrorResponse` Pydantic model and `APIError` exception class (#109)
+- FastAPI exception handlers for `APIError` and `HTTPException` fallback (#109)
+- `.gitignore` — excludes `.env`, `models/`, `__pycache__/`, build artifacts (#108)
+- `.env.example` — documented reference for all environment variables (#108)
+- `_validate_env()` — startup validation with fail-fast on invalid config (#108)
+- Unit tests for `ErrorResponse`, `APIError`, and `resolve_voice` error path (#109)
 
 ---
 

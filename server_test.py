@@ -24,6 +24,7 @@ with patch.dict("sys.modules", _mock_modules):
         _get_cached_voice_prompt, _split_sentences, _adaptive_max_tokens,
         _audio_cache_key, _get_audio_cache, _set_audio_cache,
         _audio_cache, _AUDIO_CACHE_MAX, _build_gen_kwargs,
+        APIError, ErrorResponse,
     )
     import server
 
@@ -422,6 +423,56 @@ class TestResolveVoice:
         assert resolve_voice("alloy") == "ryan"
     def test_case_insensitive(self):
         assert resolve_voice("VIVIAN") == "vivian"
+    def test_unknown_voice_raises_api_error(self):
+        with pytest.raises(APIError) as exc_info:
+            resolve_voice("nonexistent_voice")
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.code == "UNKNOWN_VOICE"
+        assert "nonexistent_voice" in exc_info.value.message
+        assert exc_info.value.context["voice"] == "nonexistent_voice"
+        assert isinstance(exc_info.value.context["valid_voices"], list)
+
+
+# --- Issue #109: Standard error response shape tests ---
+
+class TestErrorResponse:
+    def test_error_response_model_fields(self):
+        err = ErrorResponse(code="TEST_ERROR", message="Test", statusCode=400)
+        assert err.code == "TEST_ERROR"
+        assert err.message == "Test"
+        assert err.context is None
+        assert err.statusCode == 400
+
+    def test_error_response_with_context(self):
+        err = ErrorResponse(code="TEST", message="msg", context={"key": "val"}, statusCode=500)
+        d = err.model_dump()
+        assert d["code"] == "TEST"
+        assert d["context"] == {"key": "val"}
+        assert d["statusCode"] == 500
+
+    def test_error_response_serialization(self):
+        err = ErrorResponse(code="X", message="Y", statusCode=422)
+        d = err.model_dump()
+        assert set(d.keys()) == {"code", "message", "context", "statusCode"}
+
+
+class TestAPIError:
+    def test_api_error_attributes(self):
+        exc = APIError(503, "QUEUE_FULL", "busy", context={"q": 5}, headers={"Retry-After": "5"})
+        assert exc.status_code == 503
+        assert exc.code == "QUEUE_FULL"
+        assert exc.message == "busy"
+        assert exc.context == {"q": 5}
+        assert exc.headers == {"Retry-After": "5"}
+
+    def test_api_error_is_exception(self):
+        exc = APIError(400, "BAD", "bad request")
+        assert isinstance(exc, Exception)
+
+    def test_api_error_defaults(self):
+        exc = APIError(500, "ERR", "fail")
+        assert exc.context is None
+        assert exc.headers is None
 
 
 # --- Issue #15 → #82: Voice prompt cache tests ---
