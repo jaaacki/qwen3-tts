@@ -114,6 +114,48 @@ def _configure_logging():
 
 _configure_logging()
 
+def _validate_env():
+    """Validate environment variables at startup -- fail fast on bad config."""
+    errors = []
+
+    quantize = os.getenv("QUANTIZE", "").lower()
+    if quantize not in ("", "fp8", "int8"):
+        errors.append("QUANTIZE=%r. Valid: '', 'fp8', 'int8'" % quantize)
+
+    log_fmt = os.getenv("LOG_FORMAT", "json")
+    if log_fmt not in ("json", "text"):
+        errors.append("LOG_FORMAT=%r. Valid: 'json', 'text'" % log_fmt)
+
+    log_lvl = os.getenv("LOG_LEVEL", "INFO").upper()
+    valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "TRACE", "SUCCESS")
+    if log_lvl not in valid_levels:
+        errors.append("LOG_LEVEL=%r. Valid: %s" % (log_lvl, ", ".join(valid_levels)))
+
+    numeric_vars = {
+        "IDLE_TIMEOUT": "120",
+        "REQUEST_TIMEOUT": "300",
+        "MAX_QUEUE_DEPTH": "5",
+        "AUDIO_CACHE_MAX": "256",
+        "VOICE_CACHE_MAX": "32",
+        "MAX_BATCH_SIZE": "4",
+    }
+    for var, default in numeric_vars.items():
+        raw = os.getenv(var, default)
+        try:
+            val = int(raw)
+            if val < 0:
+                errors.append("%s=%r. Must be a non-negative integer" % (var, raw))
+        except ValueError:
+            errors.append("%s=%r. Must be a non-negative integer" % (var, raw))
+
+    if errors:
+        for err in errors:
+            logger.critical("Invalid %s" % err)
+        sys.exit(1)
+
+
+_validate_env()
+
 try:
     from pydub import AudioSegment as _PydubAudioSegment
 except ImportError:

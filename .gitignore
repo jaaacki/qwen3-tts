@@ -5,8 +5,13 @@ models/
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
 
 # Test output
+test_output.*
 *.wav
 *.mp3
 *.flac
