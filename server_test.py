@@ -4,6 +4,8 @@ import sys
 import io
 import hashlib
 import asyncio
+import time
+import threading
 import pytest
 import torch
 import numpy as np
@@ -18,7 +20,7 @@ _mock_modules = {
 
 with patch.dict("sys.modules", _mock_modules):
     from server import (
-        _trim_silence, _normalize_text, _expand_currency,
+        _normalize_text, _expand_currency,
         _detect_language_unicode, _get_langdetect, detect_language,
         _adjust_speed, _resample_audio, resolve_voice, _LANG_MAP,
         _get_cached_voice_prompt, _split_sentences, _adaptive_max_tokens,
@@ -27,65 +29,6 @@ with patch.dict("sys.modules", _mock_modules):
         APIError, ErrorResponse,
     )
     import server
-
-
-# --- Issue #11: VAD silence trimming tests ---
-
-class TestTrimSilence:
-    def test_trim_silence_removes_leading_silence(self):
-        sr = 24000
-        silence = np.zeros(sr)
-        speech = np.random.randn(sr).astype(np.float32) * 0.5
-        audio = np.concatenate([silence, speech])
-        with patch.object(server, "VAD_TRIM", True):
-            result = _trim_silence(audio, sr)
-        assert len(result) < len(audio)
-        assert len(result) >= len(speech)
-
-    def test_trim_silence_removes_trailing_silence(self):
-        sr = 24000
-        speech = np.random.randn(sr).astype(np.float32) * 0.5
-        silence = np.zeros(sr)
-        audio = np.concatenate([speech, silence])
-        with patch.object(server, "VAD_TRIM", True):
-            result = _trim_silence(audio, sr)
-        assert len(result) < len(audio)
-        assert len(result) >= len(speech)
-
-    def test_trim_silence_preserves_content(self):
-        sr = 24000
-        speech = np.random.randn(sr).astype(np.float32) * 0.5
-        with patch.object(server, "VAD_TRIM", True):
-            result = _trim_silence(speech.copy(), sr)
-        assert len(result) >= len(speech) - int(0.05 * sr)
-
-    def test_trim_silence_all_silence_returns_original(self):
-        sr = 24000
-        audio = np.zeros(sr, dtype=np.float32)
-        with patch.object(server, "VAD_TRIM", True):
-            result = _trim_silence(audio, sr)
-        np.testing.assert_array_equal(result, audio)
-
-    def test_trim_silence_disabled_returns_original(self):
-        sr = 24000
-        silence = np.zeros(sr)
-        speech = np.random.randn(sr).astype(np.float32) * 0.5
-        audio = np.concatenate([silence, speech, silence])
-        with patch.object(server, "VAD_TRIM", False):
-            result = _trim_silence(audio, sr)
-        np.testing.assert_array_equal(result, audio)
-
-    def test_trim_silence_adds_padding(self):
-        sr = 24000
-        pad_samples = int(0.05 * sr)
-        silence = np.zeros(sr * 2)
-        spike = np.zeros(100, dtype=np.float32)
-        spike[50] = 1.0
-        audio = np.concatenate([silence, spike, silence])
-        with patch.object(server, "VAD_TRIM", True):
-            result = _trim_silence(audio, sr)
-        assert len(result) >= len(spike)
-        assert len(result) <= len(spike) + 2 * pad_samples
 
 
 # --- Issue #12: Text normalization tests ---
@@ -492,23 +435,23 @@ def _make_wav_bytes(samples=None, sr=24000, channels=1):
 # --- Issue #16: GPU memory pool pre-allocation tests ---
 
 class TestGpuPoolPreAllocation:
-    """Verify GPU memory pool pre-warming code exists in _load_model_sync."""
+    """Verify GPU memory pool pre-warming code exists in _gpu_warmup."""
 
-    def test_load_model_contains_pool_prewarm(self):
+    def test_gpu_warmup_contains_pool_prewarm(self):
         import inspect
-        source = inspect.getsource(server._load_model_sync)
+        source = inspect.getsource(server._gpu_warmup)
         assert "Pre-warming CUDA memory pool" in source
         assert "torch.empty" in source
         assert "dtype=torch.bfloat16" in source
 
     def test_dummy_tensor_size_is_128mb(self):
         import inspect
-        source = inspect.getsource(server._load_model_sync)
+        source = inspect.getsource(server._gpu_warmup)
         assert "64 * 1024 * 1024" in source
 
     def test_pool_prewarm_has_exception_handling(self):
         import inspect
-        source = inspect.getsource(server._load_model_sync)
+        source = inspect.getsource(server._gpu_warmup)
         idx = source.find("Pre-warming CUDA memory pool")
         assert idx > 0
         section = source[idx - 200:idx + 500]
@@ -517,7 +460,7 @@ class TestGpuPoolPreAllocation:
 
     def test_pool_prewarm_after_warmup(self):
         import inspect
-        source = inspect.getsource(server._load_model_sync)
+        source = inspect.getsource(server._gpu_warmup)
         warmup_idx = source.find("Warming up GPU with multi-length synthesis")
         pool_idx = source.find("Pre-warming CUDA memory pool")
         assert warmup_idx > 0
@@ -526,9 +469,14 @@ class TestGpuPoolPreAllocation:
 
     def test_dummy_tensor_is_deleted(self):
         import inspect
-        source = inspect.getsource(server._load_model_sync)
+        source = inspect.getsource(server._gpu_warmup)
         pool_section = source[source.find("Pre-warming CUDA memory pool"):]
         assert "del dummy" in pool_section
+
+    def test_load_model_calls_gpu_warmup(self):
+        import inspect
+        source = inspect.getsource(server._load_model_sync)
+        assert "_gpu_warmup()" in source
 
 
 class TestDetectLanguage:
@@ -1111,3 +1059,142 @@ class TestBatchInference:
         assert call_count == 1
         assert sr == mock_sr
         np.testing.assert_array_equal(wavs[0], mock_wavs[0])
+
+
+# --- Issue #112: Deadlock prevention tests ---
+
+
+class TestInferenceWatchdog:
+    """Tests for inference job duration tracking and watchdog."""
+
+    def test_job_started_at_set_during_execution(self):
+        """_infer_job_started_at is set when a job runs and cleared after."""
+        timestamps = []
+
+        def capture_fn():
+            timestamps.append(server._infer_job_started_at)
+            return "done"
+
+        async def run():
+            server._infer_job_started_at = None
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+            await queue.submit(capture_fn, priority=1)
+            await asyncio.sleep(0.05)
+
+        asyncio.run(run())
+        assert len(timestamps) == 1
+        assert timestamps[0] is not None
+        assert server._infer_job_started_at is None
+
+    def test_watchdog_exits_on_stuck_job(self):
+        """Watchdog calls os._exit(1) when a job exceeds the timeout."""
+        async def run():
+            server._infer_job_started_at = time.monotonic() - 999
+            with patch.object(server, "REQUEST_TIMEOUT", 10), \
+                 patch("os._exit") as mock_exit:
+                await server._inference_watchdog_check()
+                mock_exit.assert_called_once_with(1)
+
+        asyncio.run(run())
+
+    def test_watchdog_no_exit_when_idle(self):
+        """Watchdog does nothing when no job is running."""
+        async def run():
+            server._infer_job_started_at = None
+            with patch("os._exit") as mock_exit:
+                await server._inference_watchdog_check()
+                mock_exit.assert_not_called()
+
+        asyncio.run(run())
+
+    def test_watchdog_no_exit_within_timeout(self):
+        """Watchdog does nothing when job is within timeout."""
+        async def run():
+            server._infer_job_started_at = time.monotonic()
+            with patch.object(server, "REQUEST_TIMEOUT", 300), \
+                 patch("os._exit") as mock_exit:
+                await server._inference_watchdog_check()
+                mock_exit.assert_not_called()
+
+        asyncio.run(run())
+
+
+class TestStreamSynthesizeDeadlockPrevention:
+    """Tests for _stream_synthesize deadlock prevention."""
+
+    def test_stream_uses_infer_queue_not_executor(self):
+        """_stream_synthesize submits work through _infer_queue, not _infer_executor directly."""
+        chunks_received = []
+
+        async def run():
+            def mock_streaming(*args, **kwargs):
+                yield np.zeros(100), 24000
+                yield np.zeros(100), 24000
+
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_infer_queue", queue), \
+                 patch.object(server, "_do_synthesize_streaming", mock_streaming), \
+                 patch.object(server, "REQUEST_TIMEOUT", 5):
+                async for chunk, sr in server._stream_synthesize("hello", "en", "ryan.wav", {}):
+                    chunks_received.append(chunk)
+
+        asyncio.run(run())
+        assert len(chunks_received) == 2
+
+    def test_stream_timeout_on_stuck_queue_get(self):
+        """queue.get() raises TimeoutError if no chunks arrive within REQUEST_TIMEOUT."""
+        async def run():
+            block = threading.Event()
+
+            def mock_streaming(*args, **kwargs):
+                block.wait()
+                yield np.zeros(100), 24000
+
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            try:
+                with patch.object(server, "_infer_queue", queue), \
+                     patch.object(server, "_do_synthesize_streaming", mock_streaming), \
+                     patch.object(server, "REQUEST_TIMEOUT", 0.2):
+                    with pytest.raises(asyncio.TimeoutError):
+                        async for chunk, sr in server._stream_synthesize("hello", "en", "ryan.wav", {}):
+                            pass
+            finally:
+                block.set()
+
+        asyncio.run(run())
+
+    def test_stream_sentinel_always_sent_on_error(self):
+        """_run() sends sentinel even when _do_synthesize_streaming raises."""
+        chunks_received = []
+        errors_received = []
+
+        async def run():
+            def mock_streaming(*args, **kwargs):
+                yield np.zeros(100), 24000
+                raise RuntimeError("GPU OOM")
+
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_infer_queue", queue), \
+                 patch.object(server, "_do_synthesize_streaming", mock_streaming), \
+                 patch.object(server, "REQUEST_TIMEOUT", 5):
+                try:
+                    async for chunk, sr in server._stream_synthesize("hello", "en", "ryan.wav", {}):
+                        chunks_received.append(chunk)
+                except RuntimeError as e:
+                    errors_received.append(str(e))
+
+        asyncio.run(run())
+        assert len(chunks_received) == 1
+        assert len(errors_received) == 1
+        assert "GPU OOM" in errors_received[0]
