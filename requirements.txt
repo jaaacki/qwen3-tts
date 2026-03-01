@@ -2,7 +2,7 @@
 # Base image (pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime) provides:
 #   torch==2.6.0, torchaudio==2.6.0, numpy, Python 3.11
 
-# Model library
+# Model library — base package, overridden by streaming fork in Dockerfile
 qwen-tts==0.1.1
 
 # Web framework
