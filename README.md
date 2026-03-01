@@ -1,6 +1,6 @@
 # Qwen3-TTS
 
-OpenAI-compatible Text-to-Speech API server powered by [Qwen3-TTS-0.6B](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice), running in Docker with NVIDIA GPU acceleration.
+OpenAI-compatible Text-to-Speech API server powered by [Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base), running in Docker with NVIDIA GPU acceleration.
 
 ## Features
 
@@ -11,7 +11,9 @@ OpenAI-compatible Text-to-Speech API server powered by [Qwen3-TTS-0.6B](https://
 - **Multi-language** — English, Chinese, Japanese, Korean, German, Italian, Portuguese, Spanish, French, Russian, Beijing dialect, Sichuan dialect
 - **Multiple output formats** — WAV, MP3, FLAC, OGG, Opus
 - **Speed control** — adjustable playback speed via resampling
+- **Server-side resampling** — optional `sample_rate` parameter for telephony or custom sample rates
 - **Audio output cache** — LRU cache skips GPU entirely on repeated requests (~1ms vs 500ms+)
+- **Streaming** — SSE, raw PCM, and WebSocket endpoints with per-token or per-sentence modes
 
 ## Requirements
 
@@ -50,15 +52,19 @@ curl -X POST http://localhost:8101/v1/audio/speech \
 | `response_format` | string | `wav` | Output format: `wav`, `mp3`, `flac`, `ogg`, `opus` |
 | `speed` | float | `1.0` | Playback speed multiplier |
 | `language` | string | *auto-detect* | Language override |
+| `instruct` | string | *optional* | Accepted for backwards compatibility; ignored by Base model |
+| `temperature` | float | *optional* | Sampling temperature for generation |
+| `top_p` | float | *optional* | Nucleus sampling threshold |
+| `sample_rate` | int | *optional* | Server-side resampling (e.g. `8000` for telephony) |
 
 
 ### `POST /v1/audio/speech/stream`
 
-Stream speech synthesis via Server-Sent Events. Each sentence is synthesized independently and streamed as base64-encoded raw PCM audio (signed 16-bit, 24 kHz, mono).
+Stream speech synthesis via Server-Sent Events. Each chunk is streamed as base64-encoded raw PCM audio (signed 16-bit, 24 kHz, mono).
 
 ```bash
-curl -N -X POST http://localhost:8101/v1/audio/speech/stream \\
-  -H "Content-Type: application/json" \\
+curl -N -X POST http://localhost:8101/v1/audio/speech/stream \
+  -H "Content-Type: application/json" \
   -d '{"input": "First sentence. Second sentence.", "voice": "vivian"}'
 ```
 
@@ -70,40 +76,14 @@ Each SSE event contains base64-encoded PCM data. The stream ends with `data: [DO
 | `voice` | string | `vivian` | Voice name or OpenAI alias |
 | `speed` | float | `1.0` | Playback speed multiplier |
 | `language` | string | *auto-detect* | Language override |
-| `instruct` | string | *optional* | Style/instruction control |
-
-### `POST /v1/audio/speech/clone`
-
-Generate speech using a cloned voice from a reference audio file.
-
-```bash
-curl -X POST http://localhost:8101/v1/audio/speech/clone \
-  -F "file=@reference.wav" \
-  -F "input=Hello, this is my cloned voice." \
-  -F "ref_text=Original text spoken in the reference audio." \
-  -o cloned_speech.wav
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `file` | file | *required* | Reference audio file |
-| `input` | string | *required* | Text to synthesize |
-| `ref_text` | string | *optional* | Transcript of the reference audio |
-| `language` | string | *auto-detect* | Language override |
-| `response_format` | string | `wav` | Output format |
-
-### `POST /cache/clear`
-
-Clear the audio output cache. Returns the number of entries cleared.
-
-```bash
-curl -X POST http://localhost:8101/cache/clear
-# {"cleared": 42}
-```
+| `instruct` | string | *optional* | Accepted for backwards compatibility; ignored by Base model |
+| `temperature` | float | *optional* | Sampling temperature for generation |
+| `top_p` | float | *optional* | Nucleus sampling threshold |
+| `sample_rate` | int | *optional* | Server-side resampling (e.g. `8000` for telephony) |
 
 ### `POST /v1/audio/speech/stream/pcm`
 
-Stream speech as raw PCM audio. Text is split into sentences and each sentence is synthesized and streamed as raw int16 bytes. Use the response headers to configure your audio player.
+Stream speech as raw PCM audio. Text is split into chunks and streamed as raw int16 bytes. Use the response headers to configure your audio player.
 
 ```bash
 curl -X POST http://localhost:8101/v1/audio/speech/stream/pcm \
@@ -119,11 +99,11 @@ curl -X POST http://localhost:8101/v1/audio/speech/stream/pcm \
 | `X-PCM-Bit-Depth` | `16` | Bits per sample (signed int16) |
 | `X-PCM-Channels` | `1` | Mono audio |
 
-Request body parameters are the same as `/v1/audio/speech`.
+Request body parameters are the same as `/v1/audio/speech/stream`.
 
 ### `WS /v1/audio/speech/ws`
 
-WebSocket endpoint for real-time streaming. Send JSON messages, receive binary PCM frames per sentence.
+WebSocket endpoint for real-time streaming. Send JSON messages, receive binary PCM frames.
 
 ```python
 import asyncio
@@ -152,34 +132,78 @@ asyncio.run(stream_tts())
 | `voice` | string | `vivian` | Voice name or OpenAI alias |
 | `language` | string | *auto-detect* | Language override |
 | `speed` | float | `1.0` | Playback speed multiplier |
+| `temperature` | float | *optional* | Sampling temperature for generation |
+| `top_p` | float | *optional* | Nucleus sampling threshold |
+| `sample_rate` | int | *optional* | Server-side resampling (e.g. `8000` for telephony) |
 
+### `POST /v1/audio/speech/clone`
+
+Generate speech using a cloned voice from a reference audio file.
+
+```bash
+curl -X POST http://localhost:8101/v1/audio/speech/clone \
+  -F "file=@reference.wav" \
+  -F "input=Hello, this is my cloned voice." \
+  -F "ref_text=Original text spoken in the reference audio." \
+  -o cloned_speech.wav
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | file | *required* | Reference audio file |
+| `input` | string | *required* | Text to synthesize |
+| `ref_text` | string | *optional* | Transcript of the reference audio |
+| `language` | string | *auto-detect* | Language override |
+| `response_format` | string | `wav` | Output format |
+| `temperature` | float | *optional* | Sampling temperature for generation |
+| `top_p` | float | *optional* | Nucleus sampling threshold |
 
 ### `GET /health`
 
 Returns service status, model info, CUDA availability, available voices, and cache stats (`audio_cache_size`, `audio_cache_max`).
 
+### `POST /cache/clear`
+
+Clear the audio output and voice prompt caches. Returns the number of entries cleared from each.
+
+```bash
+curl -X POST http://localhost:8101/cache/clear
+# {"audio_cleared": 42, "voice_cleared": 5}
+```
+
+### `GET /metrics`
+
+Prometheus metrics endpoint (when `PROMETHEUS_ENABLED=true`). Exposes request counts, inference duration histograms, and model load state.
+
 ## Configuration
 
-Environment variables in `compose.yaml`:
+Environment variables (set in `.env` file, referenced by `compose.yaml`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face model ID |
+| `MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | Hugging Face model ID |
 | `IDLE_TIMEOUT` | `120` | Seconds of inactivity before unloading model from GPU (0 = disabled) |
 | `REQUEST_TIMEOUT` | `300` | Maximum seconds per inference request |
-| `AUDIO_CACHE_MAX` | `256` | Max LRU cache entries for audio output (0 = disabled) |
-| `TORCH_COMPILE` | `true` | Enable torch.compile optimization (set to false to disable) |
-| `VAD_TRIM` | `true` | Trim leading/trailing silence from generated audio |
-| `TEXT_NORMALIZE` | `true` | Expand numbers, currency, and abbreviations before synthesis |
-| `VOICE_CACHE_MAX` | `32` | LRU cache capacity for processed voice clone reference audio (0 = disabled) |
 | `PRELOAD_MODEL` | `false` | Load model at startup instead of on first request |
+| `QUANTIZE` | *(empty)* | Quantization mode: `fp8` (torchao), `int8` (bitsandbytes), or empty to disable |
+| `TORCH_COMPILE` | `true` | Enable torch.compile optimization |
+| `TORCH_COMPILE_MODE` | `max-autotune` | torch.compile mode: `max-autotune`, `reduce-overhead`, `default` |
+| `CUDA_GRAPHS` | `true` | Enable CUDA graph capture via triton backend |
+| `AUDIO_CACHE_MAX` | `256` | Max LRU cache entries for audio output (0 = disabled) |
+| `VOICE_CACHE_MAX` | `32` | LRU cache capacity for voice clone speaker embeddings (0 = disabled) |
+| `TEXT_NORMALIZE` | `true` | Expand numbers, currency, and abbreviations before synthesis |
+| `MAX_QUEUE_DEPTH` | `5` | Max queued requests before 503 rejection (0 = unlimited) |
+| `STREAM_TYPE` | `sentence` | Streaming mode: `sentence` (one chunk per sentence) or `token` (per-token, sub-400ms TTFA) |
+| `STREAM_EMIT_FRAMES` | `4` | Token-mode: emit audio every N codec frames |
+| `STREAM_FIRST_EMIT` | `3` | Token-mode: first-chunk emit interval (0 = disable two-phase) |
 | `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics at `GET /metrics` |
+| `LOG_FORMAT` | `json` | Log format: `json` for structured output, `text` for human-readable |
+| `LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`, `CRITICAL` |
+| `GATEWAY_MODE` | `false` | Use gateway/worker subprocess architecture for lower idle memory |
 | `INFERENCE_CPU_CORES` | *(empty)* | Pin to specific CPU cores (e.g., `0-7`). Empty = no pinning |
 | `UNIX_SOCKET_PATH` | *(empty)* | Path to Unix socket (e.g., `/tmp/tts.sock`). Replaces TCP when set |
 | `SSL_KEYFILE` | *(empty)* | Path to TLS private key (enables HTTP/2) |
 | `SSL_CERTFILE` | *(empty)* | Path to TLS certificate (enables HTTP/2) |
-| `LOG_FORMAT` | `json` | Log format: `json` for structured output, `text` for human-readable |
-| `MAX_QUEUE_DEPTH` | `5` | Max queued requests before 503 rejection (0 = unlimited) |
 
 The model cache is persisted to `./models` via volume mount.
 
@@ -232,7 +256,13 @@ The idle watchdog still runs but skips the unload check. The model loads on firs
 ## Testing
 
 ```bash
-# Run the full test suite
+# Unit tests (no running server needed)
+pytest server_test.py -v
+
+# E2E tests (requires running server + GPU)
+pytest E2Etest/ -v
+
+# Integration test suite (requires running server)
 python test_tts.py
 
 # Quick smoke test
@@ -241,4 +271,4 @@ bash test_quick.sh
 
 ## License
 
-Uses the [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice) model — see its license for usage terms.
+Uses the [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) model — see its license for usage terms.

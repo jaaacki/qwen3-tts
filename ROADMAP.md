@@ -1,6 +1,6 @@
 # Roadmap
 
-Three-phase plan to take Qwen3-TTS from a working prototype to a production-grade, real-time TTS server. Each phase targets a minor version and has a clear milestone vision.
+Nine-phase plan to take Qwen3-TTS from a working prototype to a production-grade, real-time TTS server. Each phase targets a minor version and has a clear milestone vision.
 
 ---
 
@@ -91,6 +91,53 @@ Model-grounded: after research into the `qwen-tts` package API, three concrete g
 
 ---
 
+## Phase 6 — Performance (v0.10.1)
+
+**Vision**: Squeeze maximum throughput from the GPU — lower latency, less VRAM, better streaming.
+
+Issues are ad-hoc (no GitHub issue numbers) — performance work driven by profiling.
+
+- [x] Switch torch.compile to max-autotune mode
+- [x] Enable CUDA graphs via triton backend
+- [x] Add CUDA inference and transfer streams
+- [x] Add server-side sample rate conversion
+- [x] Pipeline sentence synthesis in streaming endpoints
+- [x] Add FP8 quantization via torchao
+- [x] Fix torch.compile mode/options conflict
+- [x] Release unused CUDA pool memory after model warmup
+
+---
+
+## Phase 7 — Observability (v0.9.0, v0.9.1)
+
+**Vision**: Every meaningful event is logged with enough context to diagnose production issues without reproducing them.
+
+Note: versions v0.9.0/v0.9.1 are chronologically before v0.10.x but were documented separately in the CHANGELOG. The logging work was foundational — migrating to loguru and adding comprehensive structured logging before the model switch.
+
+- [x] Migrate logging from stdlib to loguru
+- [x] Add comprehensive structured logging across all code paths
+
+---
+
+## Phase 8 — Foundation (v0.10.0, v0.10.2)
+
+**Vision**: The server uses the right model variant and speaks a consistent error language.
+
+- [x] Switch from CustomVoice to Base model with voice cloning support
+- [x] #107 Standardize structured logging output (ISO 8601, ops level names, stdout)
+- [x] #108 Add startup env validation and .env.example
+- [x] #109 Standardize error response shape
+
+---
+
+## Phase 9 — Streaming (v0.10.3)
+
+**Vision**: First audio byte reaches the client before the first sentence finishes synthesizing.
+
+- [x] #110 Add per-token streaming via rekuenkdr/Qwen3-TTS-streaming fork
+
+---
+
 ## Backlog
 
 No unplaced items.
@@ -99,4 +146,4 @@ No unplaced items.
 
 ## Current Status
 
-**v0.8.0** — Phase 5 Scale complete. Issues #84–#86 implemented. All planned phases complete.
+**v0.10.3** — Phase 9 Streaming complete. All planned phases complete.

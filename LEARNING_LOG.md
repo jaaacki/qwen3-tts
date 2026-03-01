@@ -4,6 +4,70 @@ Decisions, patterns, and lessons from building the Qwen3-TTS server. Each entry 
 
 ---
 
+## Entry 0027 — Per-token streaming: fork-based architecture for sub-sentence latency
+**Date**: 2026-03-01
+**Type**: Why this design
+**Related**: Issue #110 — Per-token streaming
+
+The sentence-chunked streaming endpoints (`/stream`, `/stream/pcm`, `/ws`) have a fundamental latency floor: the client hears nothing until the first sentence is fully synthesized. For short sentences that's ~400ms, but for long ones it can be seconds. Per-token streaming eliminates this by emitting audio fragments as the model generates tokens, before any sentence is complete.
+
+This required a fork of the qwen-tts library (rekuenkdr/Qwen3-TTS-streaming) that exposes `stream_generate_voice_clone()` — a generator yielding audio frames during generation. The server wraps this in `_do_synthesize_streaming()` (sync generator) and `_stream_synthesize()` (async bridge using `asyncio.Queue`). Two env vars control emission cadence: `STREAM_EMIT_FRAMES` (frames between emissions, default 4) and `STREAM_FIRST_EMIT` (first-chunk interval, default 3 for faster initial audio).
+
+The dual-mode architecture (`STREAM_TYPE=sentence` vs `token`) preserves backward compatibility. If the streaming fork isn't installed, the server detects this at import time (`_HAS_STREAMING` flag) and falls back to sentence mode with a warning log. This means the same Docker image works with or without the fork — useful during migration.
+
+---
+
+## Entry 0026 — Standardized error responses: why {detail} isn't enough
+**Date**: 2026-03-01
+**Type**: Why this design
+**Related**: Issue #109 — Standardize error response shape
+
+FastAPI's default error shape `{"detail": "..."}` gives callers a string. That's fine for humans reading logs but terrible for programmatic error handling — callers have to parse the string to figure out what went wrong. The standard shape `{code, message, context, statusCode}` gives each error a machine-readable code (`QUEUE_FULL`, `UNKNOWN_VOICE`, `SYNTHESIS_TIMEOUT`, etc.) that callers can switch on, a human-readable message, optional context dict for debugging, and the HTTP status code echoed in the body for clients that lose access to headers (proxies, message queues). The `APIError` exception class and FastAPI exception handlers ensure every error path — including unhandled exceptions — produces this shape consistently.
+
+---
+
+## Entry 0025 — Startup env validation: fail fast, fail clearly
+**Date**: 2026-03-01
+**Type**: What could go wrong
+**Related**: Issue #108 — Startup env validation
+
+Before `_validate_env()`, misconfigured environment variables caused cryptic runtime failures. Setting `QUANTIZE=fp16` (invalid — valid values are `int8`, `fp8`, or empty) would pass startup silently and fail during model load with an inscrutable torchao error. Setting `LOG_LEVEL=VERBOSE` (invalid) would silently default to INFO. The validation function checks every env var at startup and exits immediately with a clear error message listing what's wrong and what the valid values are. The `.env.example` file serves double duty: it documents every variable and provides safe defaults for `cp .env.example .env` workflows.
+
+---
+
+## Entry 0024 — Structured logging standardization: ISO 8601, ops levels, stdout
+**Date**: 2026-03-01
+**Type**: Why this design
+**Related**: Issue #107 — Standardize structured logging output
+
+Three small changes with outsized operational impact. (1) Full ISO 8601 timestamps with timezone and fractional seconds (`2026-03-01T14:30:00.123+09:00`) — log aggregators (Loki, CloudWatch, Datadog) parse this natively without custom timestamp formats. (2) Level names remapped to ops convention (`fatal/error/warn/info/debug/trace` instead of Python's `CRITICAL/ERROR/WARNING/INFO/DEBUG`) — consistent with every other service in a typical stack. (3) JSON output to stdout instead of stderr — Docker and container orchestrators capture stdout by default, and mixing stdout/stderr causes interleaving issues in log pipelines.
+
+---
+
+## Entry 0023 — Performance optimizations: CUDA streams, sentence pipelining, and FP8
+**Date**: 2026-03-01
+**Type**: What just happened
+**Related**: Performance optimization work (no issue numbers)
+
+Three categories of performance work, each targeting a different bottleneck:
+
+**GPU utilization** — Separate CUDA streams for inference and host transfer let the GPU overlap model execution with copying results to CPU. Combined with `torch.compile(mode="max-autotune")` and CUDA graph capture via triton backend, this squeezes more throughput from the same hardware. The `max-autotune` mode is slower on first inference (kernel autotuning) but faster on every subsequent call — the right tradeoff for a long-running server.
+
+**Streaming latency** — Sentence pipelining submits sentence N+1 to the GPU while sentence N's audio is being yielded to the client. The client perceives continuous audio with no inter-sentence gap, even though synthesis is sequential on the GPU.
+
+**VRAM efficiency** — FP8 quantization via torchao (`Float8WeightOnlyConfig`) reduces model weights to 8-bit floats post-load, dropping VRAM from ~2600 MiB to ~2088 MiB. INT8 via bitsandbytes was attempted first but failed — `deepcopy` in the library's `get_keys_to_not_convert` can't pickle the Qwen3-TTS model. The FP8 path also required using the correct torchao API: `Float8WeightOnlyConfig` applied post-load, not `TorchAoConfig` at load time which doesn't exist in current torchao.
+
+---
+
+## Entry 0022 — Loguru migration: intercepting stdlib loggers
+**Date**: 2026-02-24
+**Type**: Why this design
+**Related**: Loguru migration (v0.9.0)
+
+Python's stdlib logging and loguru are two completely separate logging systems. FastAPI and uvicorn use stdlib logging internally, so simply switching the application code to loguru leaves framework logs flowing through a different pipeline — different formats, different outputs, sometimes even different destinations. The `_InterceptHandler` bridges this: it's a stdlib `logging.Handler` subclass that intercepts every stdlib log record and re-emits it through loguru. Installed on the root logger, it captures everything — uvicorn access logs, FastAPI error traces, third-party library warnings — and routes them all through loguru's formatter. This means one log format, one output, one configuration point, regardless of which library emitted the log.
+
+---
+
 ## Entry 0021 — Why VAD doesn't belong in a TTS pipeline
 **Date**: 2026-02-24
 **Type**: What could go wrong

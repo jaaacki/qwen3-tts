@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.2 — 2026-03-01
+## v0.10.3 — 2026-03-01
 
 Per-token streaming via rekuenkdr/Qwen3-TTS-streaming fork (#110).
 
@@ -21,7 +21,7 @@ Per-token streaming via rekuenkdr/Qwen3-TTS-streaming fork (#110).
 
 ---
 
-## v0.10.1 — 2026-03-01
+## v0.10.2 — 2026-03-01
 
 Standardize logging, environment config, and error handling (#107, #108, #109).
 
@@ -41,6 +41,29 @@ Standardize logging, environment config, and error handling (#107, #108, #109).
 - `.env.example` — documented reference for all environment variables (#108)
 - `_validate_env()` — startup validation with fail-fast on invalid config (#108)
 - Unit tests for `ErrorResponse`, `APIError`, and `resolve_voice` error path (#109)
+
+---
+
+## v0.10.1 — 2026-03-01
+
+Performance optimizations for inference latency, VRAM efficiency, and streaming throughput.
+
+### Added
+- **Server-side resampling**: `sample_rate` parameter on all speech endpoints — resamples via `scipy.signal.resample` before returning, eliminating client-side overhead
+- **CUDA inference and transfer streams**: separate `torch.cuda.Stream` for inference and host transfer, enabling overlap
+- **Sentence pipelining**: streaming endpoints (`/stream`, `/stream/pcm`, `/ws`) pre-submit sentence N+1 to GPU while yielding sentence N's audio
+- **FP8 quantization**: `QUANTIZE=fp8` via torchao `Float8WeightOnlyConfig` — ~2088 MiB VRAM vs ~2600+ without
+- `TORCH_COMPILE_MODE` env var — `max-autotune` (default), `reduce-overhead`, `default`
+- `CUDA_GRAPHS` env var — enable CUDA graph capture via triton backend (default `true`)
+
+### Changed
+- `torch.compile` mode switched from `reduce-overhead` to `max-autotune` for better kernel selection
+- CUDA memory pool: release unused pool memory after model warmup via `torch.cuda.memory.empty_cache()`
+
+### Fixed
+- `torch.compile` mode/options conflict resolved — `CUDA_GRAPHS` and `TORCH_COMPILE_MODE` no longer clash
+- FP8 quantization uses correct torchao API (`Float8WeightOnlyConfig` post-load, not `TorchAoConfig` at load time)
+- INT8 quantization (bitsandbytes) disabled — `deepcopy` in `get_keys_to_not_convert` can't pickle Qwen3-TTS model; `QUANTIZE=int8` logs a warning and falls back to no quantization
 
 ---
 
