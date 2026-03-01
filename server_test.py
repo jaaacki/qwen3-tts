@@ -4,6 +4,8 @@ import sys
 import io
 import hashlib
 import asyncio
+import time
+import threading
 import pytest
 import torch
 import numpy as np
@@ -1057,3 +1059,142 @@ class TestBatchInference:
         assert call_count == 1
         assert sr == mock_sr
         np.testing.assert_array_equal(wavs[0], mock_wavs[0])
+
+
+# --- Issue #112: Deadlock prevention tests ---
+
+
+class TestInferenceWatchdog:
+    """Tests for inference job duration tracking and watchdog."""
+
+    def test_job_started_at_set_during_execution(self):
+        """_infer_job_started_at is set when a job runs and cleared after."""
+        timestamps = []
+
+        def capture_fn():
+            timestamps.append(server._infer_job_started_at)
+            return "done"
+
+        async def run():
+            server._infer_job_started_at = None
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+            await queue.submit(capture_fn, priority=1)
+            await asyncio.sleep(0.05)
+
+        asyncio.run(run())
+        assert len(timestamps) == 1
+        assert timestamps[0] is not None
+        assert server._infer_job_started_at is None
+
+    def test_watchdog_exits_on_stuck_job(self):
+        """Watchdog calls os._exit(1) when a job exceeds the timeout."""
+        async def run():
+            server._infer_job_started_at = time.monotonic() - 999
+            with patch.object(server, "REQUEST_TIMEOUT", 10), \
+                 patch("os._exit") as mock_exit:
+                await server._inference_watchdog_check()
+                mock_exit.assert_called_once_with(1)
+
+        asyncio.run(run())
+
+    def test_watchdog_no_exit_when_idle(self):
+        """Watchdog does nothing when no job is running."""
+        async def run():
+            server._infer_job_started_at = None
+            with patch("os._exit") as mock_exit:
+                await server._inference_watchdog_check()
+                mock_exit.assert_not_called()
+
+        asyncio.run(run())
+
+    def test_watchdog_no_exit_within_timeout(self):
+        """Watchdog does nothing when job is within timeout."""
+        async def run():
+            server._infer_job_started_at = time.monotonic()
+            with patch.object(server, "REQUEST_TIMEOUT", 300), \
+                 patch("os._exit") as mock_exit:
+                await server._inference_watchdog_check()
+                mock_exit.assert_not_called()
+
+        asyncio.run(run())
+
+
+class TestStreamSynthesizeDeadlockPrevention:
+    """Tests for _stream_synthesize deadlock prevention."""
+
+    def test_stream_uses_infer_queue_not_executor(self):
+        """_stream_synthesize submits work through _infer_queue, not _infer_executor directly."""
+        chunks_received = []
+
+        async def run():
+            def mock_streaming(*args, **kwargs):
+                yield np.zeros(100), 24000
+                yield np.zeros(100), 24000
+
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_infer_queue", queue), \
+                 patch.object(server, "_do_synthesize_streaming", mock_streaming), \
+                 patch.object(server, "REQUEST_TIMEOUT", 5):
+                async for chunk, sr in server._stream_synthesize("hello", "en", "ryan.wav", {}):
+                    chunks_received.append(chunk)
+
+        asyncio.run(run())
+        assert len(chunks_received) == 2
+
+    def test_stream_timeout_on_stuck_queue_get(self):
+        """queue.get() raises TimeoutError if no chunks arrive within REQUEST_TIMEOUT."""
+        async def run():
+            block = threading.Event()
+
+            def mock_streaming(*args, **kwargs):
+                block.wait()
+                yield np.zeros(100), 24000
+
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            try:
+                with patch.object(server, "_infer_queue", queue), \
+                     patch.object(server, "_do_synthesize_streaming", mock_streaming), \
+                     patch.object(server, "REQUEST_TIMEOUT", 0.2):
+                    with pytest.raises(asyncio.TimeoutError):
+                        async for chunk, sr in server._stream_synthesize("hello", "en", "ryan.wav", {}):
+                            pass
+            finally:
+                block.set()
+
+        asyncio.run(run())
+
+    def test_stream_sentinel_always_sent_on_error(self):
+        """_run() sends sentinel even when _do_synthesize_streaming raises."""
+        chunks_received = []
+        errors_received = []
+
+        async def run():
+            def mock_streaming(*args, **kwargs):
+                yield np.zeros(100), 24000
+                raise RuntimeError("GPU OOM")
+
+            queue = server.PriorityInferQueue()
+            queue._infer_executor = ThreadPoolExecutor(max_workers=1)
+            queue.start()
+
+            with patch.object(server, "_infer_queue", queue), \
+                 patch.object(server, "_do_synthesize_streaming", mock_streaming), \
+                 patch.object(server, "REQUEST_TIMEOUT", 5):
+                try:
+                    async for chunk, sr in server._stream_synthesize("hello", "en", "ryan.wav", {}):
+                        chunks_received.append(chunk)
+                except RuntimeError as e:
+                    errors_received.append(str(e))
+
+        asyncio.run(run())
+        assert len(chunks_received) == 1
+        assert len(errors_received) == 1
+        assert "GPU OOM" in errors_received[0]
