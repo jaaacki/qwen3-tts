@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -147,6 +147,26 @@ def _validate_env():
                 errors.append("%s=%r. Must be a non-negative integer" % (var, raw))
         except ValueError:
             errors.append("%s=%r. Must be a non-negative integer" % (var, raw))
+
+    stream_type = os.getenv("STREAM_TYPE", "sentence").lower()
+    if stream_type not in ("sentence", "token"):
+        errors.append("STREAM_TYPE=%r. Valid: 'sentence', 'token'" % stream_type)
+
+    stream_emit = os.getenv("STREAM_EMIT_FRAMES", "4")
+    try:
+        val = int(stream_emit)
+        if val < 1:
+            errors.append("STREAM_EMIT_FRAMES=%r. Must be a positive integer" % stream_emit)
+    except ValueError:
+        errors.append("STREAM_EMIT_FRAMES=%r. Must be a positive integer" % stream_emit)
+
+    stream_first = os.getenv("STREAM_FIRST_EMIT", "3")
+    try:
+        val = int(stream_first)
+        if val < 0:
+            errors.append("STREAM_FIRST_EMIT=%r. Must be a non-negative integer" % stream_first)
+    except ValueError:
+        errors.append("STREAM_FIRST_EMIT=%r. Must be a non-negative integer" % stream_first)
 
     if errors:
         for err in errors:
@@ -396,6 +416,17 @@ TORCH_COMPILE_MODE = os.getenv("TORCH_COMPILE_MODE", "max-autotune")
 # CUDA graphs via triton backend — enables automatic graph capture/replay
 CUDA_GRAPHS = os.getenv("CUDA_GRAPHS", "true").lower() in ("true", "1")
 
+# Per-token streaming mode — "sentence" (default) or "token" (sub-400ms TTFA)
+STREAM_TYPE = os.getenv("STREAM_TYPE", "sentence").lower()
+
+# Token-mode tuning: frames between emissions, first-chunk emit interval
+STREAM_EMIT_FRAMES = int(os.getenv("STREAM_EMIT_FRAMES", "4"))
+STREAM_FIRST_EMIT = int(os.getenv("STREAM_FIRST_EMIT", "3"))
+
+# Whether the qwen-tts fork with stream_generate_voice_clone() is available.
+# Set during model load after probing the model instance.
+_HAS_STREAMING = False
+
 # Batch inference — max jobs per GPU dispatch (1 = disabled)
 MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "4"))
 
@@ -455,6 +486,9 @@ logger.bind(
     VOICE_CACHE_MAX=VOICE_CACHE_MAX,
     TORCH_COMPILE_MODE=TORCH_COMPILE_MODE,
     CUDA_GRAPHS=CUDA_GRAPHS,
+    STREAM_TYPE=STREAM_TYPE,
+    STREAM_EMIT_FRAMES=STREAM_EMIT_FRAMES,
+    STREAM_FIRST_EMIT=STREAM_FIRST_EMIT,
 ).info("Server configuration loaded")
 
 # Reference audio directory — each voice is backed by a pre-generated WAV file
@@ -544,7 +578,7 @@ def _resolve_quant_kwargs() -> tuple[torch.dtype, dict]:
 
 def _load_model_sync():
     """Load model into GPU (blocking). Called from async context via lock."""
-    global model, loaded_model_id, _last_used
+    global model, loaded_model_id, _last_used, _HAS_STREAMING, STREAM_TYPE
     from qwen_tts import Qwen3TTSModel
 
     if model is not None:
@@ -618,6 +652,25 @@ def _load_model_sync():
         except Exception as e:
             logger.warning("torch.compile not available or failed: {}", e)
 
+    # Enable per-token streaming optimizations if fork is installed
+    if STREAM_TYPE == "token" and hasattr(model, "enable_streaming_optimizations"):
+        try:
+            model.enable_streaming_optimizations(
+                decode_window_frames=80,
+                use_compile=(os.getenv("TORCH_COMPILE", "true").lower() == "true"),
+                compile_mode=TORCH_COMPILE_MODE if TORCH_COMPILE_MODE != "false" else "reduce-overhead",
+                use_cuda_graphs=CUDA_GRAPHS,
+            )
+            logger.info("streaming_optimizations_enabled")
+        except Exception as e:
+            logger.warning("Failed to enable streaming optimizations: {}", e)
+
+    # Detect whether the streaming fork is installed
+    _HAS_STREAMING = hasattr(model, "stream_generate_voice_clone")
+    logger.bind(has_streaming=_HAS_STREAMING, stream_type=STREAM_TYPE).info(
+        "Streaming fork detection complete"
+    )
+
     # Pre-compute voice clone prompts from reference audio files
     logger.info("Pre-computing voice prompts from reference audio")
     for voice_file in sorted(set(VOICE_MAP.values())):
@@ -681,16 +734,22 @@ def _load_model_sync():
         reserved = torch.cuda.memory_reserved() / 1024**2
         logger.bind(gpu_allocated_mb=round(allocated), gpu_reserved_mb=round(reserved)).info("GPU memory after load")
 
+    # Graceful fallback: if token streaming requested but fork not installed
+    if STREAM_TYPE == "token" and not hasattr(model, "stream_generate_voice_clone"):
+        logger.warning("STREAM_TYPE=token but streaming fork not installed, falling back to sentence")
+        STREAM_TYPE = "sentence"
+
 
 def _unload_model_sync():
     """Unload model from GPU to free VRAM."""
-    global model, _inference_stream, _transfer_stream
+    global model, _inference_stream, _transfer_stream, _HAS_STREAMING
 
     if model is None:
         return
 
     logger.info("Unloading model (idle timeout)")
     _voice_prompts.clear()
+    _HAS_STREAMING = False
     _inference_stream = None
     _transfer_stream = None
     del model
@@ -1134,6 +1193,53 @@ def _do_voice_clone(text, language, ref_prompt, gen_kwargs):
     return wavs, sr
 
 
+def _do_synthesize_streaming(text, language, voice_file, gen_kwargs):
+    """Yield (chunk_np, sr) tuples via per-token streaming."""
+    prompt = _voice_prompts[voice_file]
+    stream = _inference_stream
+    with torch.inference_mode():
+        ctx = torch.cuda.stream(stream) if stream is not None else nullcontext()
+        with ctx:
+            for chunk, sr in model.stream_generate_voice_clone(
+                text=text,
+                language=language,
+                voice_clone_prompt=prompt,
+                emit_every_frames=STREAM_EMIT_FRAMES,
+                decode_window_frames=80,
+                overlap_samples=512,
+                first_chunk_emit_every=STREAM_FIRST_EMIT if STREAM_FIRST_EMIT > 0 else None,
+                first_chunk_decode_window=48,
+                first_chunk_frames=48,
+                repetition_penalty=gen_kwargs.get("repetition_penalty", 1.05),
+                max_new_tokens=gen_kwargs.get("max_new_tokens", 2048),
+            ):
+                yield chunk, sr
+
+
+async def _stream_synthesize(text, language, voice_file, gen_kwargs):
+    """Async generator bridging sync GPU streaming -> async endpoint."""
+    queue = asyncio.Queue(maxsize=2)
+    loop = asyncio.get_running_loop()
+
+    def _run():
+        try:
+            for chunk, sr in _do_synthesize_streaming(text, language, voice_file, gen_kwargs):
+                # Blocking put — applies backpressure to GPU thread when queue is full
+                asyncio.run_coroutine_threadsafe(queue.put((chunk, sr)), loop).result()
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(queue.put(e), loop).result()
+
+    _infer_executor.submit(_run)
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
 async def _encode_audio_async(audio_data, sample_rate, output_format):
     """Run audio encoding in the CPU thread pool, overlapping with GPU work."""
     loop = asyncio.get_running_loop()
@@ -1285,6 +1391,48 @@ async def synthesize_speech_stream(request: TTSRequest):
         t_stream_start = time.perf_counter()
         chunks_sent = 0
 
+        if STREAM_TYPE == "token":
+            # Per-token streaming — full text, no sentence splitting
+            gen_kwargs = _build_gen_kwargs(text, request)
+            try:
+                async for chunk, sr_val in _stream_synthesize(text, language, voice_file, gen_kwargs):
+                    audio_data = np.array(chunk, dtype=np.float32, copy=True)
+                    if audio_data.ndim > 1:
+                        audio_data = audio_data.squeeze()
+                    audio_data = _adjust_speed(audio_data, sr_val, request.speed)
+                    if request.sample_rate:
+                        audio_data = _resample_audio(audio_data, sr_val, request.sample_rate)
+                    audio_int16 = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
+                    pcm_bytes = audio_int16.tobytes()
+                    yield f"data: {base64.b64encode(pcm_bytes).decode()}\n\n"
+                    t_now = time.perf_counter()
+                    logger.bind(
+                        request_id=request_id,
+                        chunk_idx=chunks_sent,
+                        ms=round((t_now - t_stream_start) * 1000) if chunks_sent == 0 else None,
+                        ttfc_ms=round((t_now - t_stream_start) * 1000) if chunks_sent == 0 else None,
+                    ).info("token_chunk_sent")
+                    chunks_sent += 1
+                    _last_used = time.time()
+            except asyncio.TimeoutError:
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream",
+                            chunks_sent=chunks_sent).error("Token stream timed out")
+                yield "data: [ERROR] Synthesis timed out\n\n"
+                return
+            except Exception as e:
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream",
+                            chunks_sent=chunks_sent).opt(exception=True).error("Token stream failed")
+                yield f"data: [ERROR] {str(e)}\n\n"
+                return
+
+            yield "data: [DONE]\n\n"
+            logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream", voice=voice_file,
+                        language=language, chunks_sent=chunks_sent, mode="token",
+                        chars=len(text), total_ms=round((time.perf_counter() - t_stream_start) * 1000),
+                        ).info("stream_complete")
+            return
+
+        # else: sentence-level streaming (existing code below, unchanged)
         def _make_synth_fn(s, gk):
             return lambda: _do_synthesize(s, language, voice_file, gk)
 
@@ -1507,6 +1655,44 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
         t_pcm_start = time.perf_counter()
         chunks_sent = 0
 
+        if STREAM_TYPE == "token":
+            gen_kwargs = _build_gen_kwargs(text, request)
+            try:
+                async for chunk, sr_val in _stream_synthesize(text, language, voice_file, gen_kwargs):
+                    _last_used = time.time()
+                    audio_data = np.array(chunk, dtype=np.float32, copy=True)
+                    if audio_data.ndim > 1:
+                        audio_data = audio_data.squeeze()
+                    audio_data = _adjust_speed(audio_data, sr_val, request.speed)
+                    if request.sample_rate:
+                        audio_data = _resample_audio(audio_data, sr_val, request.sample_rate)
+                    pcm_data = np.clip(audio_data, -1.0, 1.0)
+                    pcm_bytes = (pcm_data * 32767).astype(np.int16).tobytes()
+                    yield pcm_bytes
+                    t_now = time.perf_counter()
+                    logger.bind(
+                        request_id=request_id,
+                        chunk_idx=chunks_sent,
+                        ms=round((t_now - t_pcm_start) * 1000) if chunks_sent == 0 else None,
+                        ttfc_ms=round((t_now - t_pcm_start) * 1000) if chunks_sent == 0 else None,
+                    ).info("token_chunk_sent")
+                    chunks_sent += 1
+            except asyncio.TimeoutError:
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm",
+                            chunks_sent=chunks_sent).error("Token PCM stream timed out")
+                return
+            except Exception:
+                logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm",
+                            chunks_sent=chunks_sent).opt(exception=True).error("Token PCM stream failed")
+                return
+
+            logger.bind(request_id=request_id, endpoint="/v1/audio/speech/stream/pcm", voice=voice_file,
+                        language=language, chunks_sent=chunks_sent, mode="token",
+                        chars=len(text), total_ms=round((time.perf_counter() - t_pcm_start) * 1000),
+                        ).info("pcm_stream_complete")
+            return
+
+        # else: sentence-level (existing code below, unchanged)
         def _make_synth_fn(s, gk):
             return lambda: _do_synthesize(s, language, voice_file, gk)
 
@@ -1590,6 +1776,7 @@ async def synthesize_speech_stream_pcm(request: TTSRequest):
 @app.websocket("/v1/audio/speech/ws")
 async def ws_synthesize(websocket: WebSocket):
     """WebSocket streaming endpoint. Send JSON, receive binary PCM per sentence."""
+    global _last_used
     ws_id = str(uuid.uuid4())[:8]
     request_id = ws_id
     await websocket.accept()
@@ -1614,13 +1801,6 @@ async def ws_synthesize(websocket: WebSocket):
 
             await _ensure_model_loaded()
 
-            sentences = _split_sentences(text)
-            if not sentences:
-                sentences = [text]
-
-            def _ws_make_synth_fn(s, gk):
-                return lambda: _do_synthesize(s, language, voice_file, gk)
-
             def _ws_build_gen_kwargs(s):
                 gk = {"max_new_tokens": _adaptive_max_tokens(s)}
                 if ws_temperature is not None:
@@ -1628,6 +1808,38 @@ async def ws_synthesize(websocket: WebSocket):
                 if ws_top_p is not None:
                     gk["top_p"] = float(ws_top_p)
                 return gk
+
+            if STREAM_TYPE == "token":
+                # Per-token streaming — no sentence splitting
+                ws_gen_kwargs = _ws_build_gen_kwargs(text)
+                t_ws_token_start = time.perf_counter()
+                chunk_count = 0
+                async for chunk, sr_val in _stream_synthesize(text, language, voice_file, ws_gen_kwargs):
+                    audio_data = np.array(chunk, dtype=np.float32, copy=True)
+                    if audio_data.ndim > 1:
+                        audio_data = audio_data.squeeze()
+                    audio_data = _adjust_speed(audio_data, sr_val, speed)
+                    if ws_sample_rate:
+                        audio_data = _resample_audio(audio_data, sr_val, int(ws_sample_rate))
+                    pcm = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+                    await websocket.send_bytes(pcm)
+                    _last_used = time.time()
+                    logger.bind(
+                        request_id=request_id, ws_id=ws_id,
+                        chunk_idx=chunk_count,
+                        ms=round((time.perf_counter() - t_ws_token_start) * 1000) if chunk_count == 0 else None,
+                    ).info("ws_token_chunk_sent")
+                    chunk_count += 1
+                await websocket.send_json({"event": "done"})
+                messages_handled += 1
+                continue  # skip sentence-level code below
+
+            sentences = _split_sentences(text)
+            if not sentences:
+                sentences = [text]
+
+            def _ws_make_synth_fn(s, gk):
+                return lambda: _do_synthesize(s, language, voice_file, gk)
 
             # Pre-fetch: submit first sentence immediately
             pending_future = None
@@ -1676,7 +1888,6 @@ async def ws_synthesize(websocket: WebSocket):
 
                 pcm = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
                 await websocket.send_bytes(pcm)
-                global _last_used
                 _last_used = time.time()
                 sentence_idx += 1
 
