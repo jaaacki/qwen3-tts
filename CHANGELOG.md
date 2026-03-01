@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.10.2 — 2026-03-01
+
+Per-token streaming via rekuenkdr/Qwen3-TTS-streaming fork (#110).
+
+### Added
+- **Per-token streaming**: sub-400ms TTFA via `stream_generate_voice_clone()` API (#110)
+- `STREAM_TYPE` env var — `sentence` (default, existing behavior) or `token` (per-token streaming)
+- `STREAM_EMIT_FRAMES` env var — frames between audio emissions in token mode (default: 4)
+- `STREAM_FIRST_EMIT` env var — first-chunk emit interval for two-phase latency (default: 3)
+- `_do_synthesize_streaming()` sync generator and `_stream_synthesize()` async bridge via `asyncio.Queue`
+- Streaming optimizations enabled during model load (`enable_streaming_optimizations()`)
+- `_HAS_STREAMING` runtime detection flag for fork availability
+- Graceful fallback: if fork not installed, logs warning and falls back to sentence mode
+
+### Changed
+- `/v1/audio/speech/stream`, `/stream/pcm`, `/ws` — dual-mode: token vs sentence streaming
+- Dockerfile: streaming fork installed after torchao layer (preserves flash-attn cache)
+- `.env.example`: new streaming configuration section
+
+---
+
 ## v0.10.1 — 2026-03-01
 
 Standardize logging, environment config, and error handling (#107, #108, #109).
