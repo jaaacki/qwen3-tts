@@ -1,0 +1,46 @@
+# Version control
+.git/
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Documentation (not needed in image)
+docs/
+*.md
+FINDINGS.md
+improvements.md
+LEARNING_LOG.md
+RESEARCH_ANALYSIS.md
+
+# Tests (not needed in image)
+E2Etest/
+server_test.py
+test_tts.py
+test_quick.sh
+
+# Model weights (downloaded at runtime, not shipped in image)
+models/
+
+# Environment & local settings
+.env
+.env.example
+.claude/
+.worktrees/
+.agent-rules/
+
+# Test/audio artifacts
+test_output.*
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Exception: reference voice WAV files ARE needed
+!voices/*.wav
